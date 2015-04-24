@@ -94,3 +94,18 @@ Runner options
     +show <file>            Print the content of the freezed object created by spawn
     +silent                 Decrease verbosity of the Runner module
 
+Frequently (and not so frequently) asked questions
+--------------------------------------------------
+<dl>
+<dt>How to rerun a task</dt>
+<dd>The pipelines know that a task finished by checking the existence of checkpoint files. In order to reduce the number of stat calls, the pipeline keeps a cache of finished tasks. Therefore, to rerun a task, it is not enough to remove the specific checkpoin file, one has to tell the pipeline to ignore the cached status: run the pipeline as usual, but add the **+nocache** option.
+</dd>
+
+<dt>How to skip a job</dt>
+<dd>If a task keeps failing, the pipeline can be told to skip the offending task by setting negative value of the **+retries** option. With negative value of +retries, a skip file with the ".s" suffix is created and the job is reported as finished. The skip files are cleaned automatically when +retries is set to a positive value. A non cleanable variant is a force skip ".fs" file which is never cleaned by the pipeline and is created/removed manually by the user. When .fs is cleaned by the user, the pipeline must be run with +nocache in order to notice the change.
+</dd>
+
+<dt>Kill all running jobs</dt>
+<dd>When something goes wrong and all jobs must be killed, the **+kill** option does the trick.
+</dd>
+</dl>
