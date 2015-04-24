@@ -98,7 +98,7 @@ Frequently (and not so frequently) asked questions
 --------------------------------------------------
 <dl>
 <dt>How to rerun a task</dt>
-<dd>The pipelines know that a task finished by checking the existence of checkpoint files. In order to reduce the number of stat calls, the pipeline keeps a cache of finished tasks. Therefore, to rerun a task, it is not enough to remove the specific checkpoin file, one has to tell the pipeline to ignore the cached status: run the pipeline as usual, but add the <bb>+nocache</bb> option.
+<dd>The pipelines know that a task finished by checking the existence of checkpoint files. In order to reduce the number of stat calls, the pipeline keeps a cache of finished tasks. Therefore, to rerun a task, it is not enough to remove the specific checkpoin file, one has to tell the pipeline to ignore the cached status: run the pipeline as usual, but add the <b>+nocache</b> option.
 </dd>
 
 <dt>How to skip a job</dt>
