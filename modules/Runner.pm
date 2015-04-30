@@ -399,7 +399,7 @@ sub set_limits
 sub _update_limits
 {
     my ($self,$wfile,$id) = @_;
-    my $limits_fname = "$wfile.$id.limits";
+    my $limits_fname = "$wfile.r.$id.limits";
     if ( !-e $limits_fname ) { return; }
     my $limits = do "$limits_fname";
     if ( $@ ) { $self->throw("do $limits_fname: $@\n"); }
