@@ -1,4 +1,4 @@
-The vr-runner package provides a leightweight pipeline framework.
+The vr-runner package provides a lightweight pipeline framework.
 
 Runner pipelines
 ----------------
