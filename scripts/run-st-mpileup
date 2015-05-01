@@ -6,7 +6,6 @@
 use strict;
 use warnings;
 use Carp;
-use Utils;
 
 my $runner = myRunner->new();
 $runner->run();
@@ -403,13 +402,6 @@ sub save_config
     print $fh "# $about";
     close($fh);
     $self->cmd("cat $src >> $dst");
-}
-
-sub cmd
-{
-    my ($self,$cmd) = @_;
-    $cmd =~ s/\n/ /g;
-    return Utils::CMD($cmd,{verbose=>1});
 }
 
 sub check_sanity
