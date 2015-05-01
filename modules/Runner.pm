@@ -1118,8 +1118,9 @@ sub _mkdir
                 The command to be executed
             <hash>
                 Optional arguments: 
-                - verbose           .. print command to STDERR before executing [0]
+                - exit_on_error     .. if set, don't throw on errors [0]
                 - require_status    .. throw if exit status is different [0]
+                - verbose           .. print command to STDERR before executing [0]
 
 =cut
 
@@ -1148,6 +1149,8 @@ sub cmd
         # child
         exec('/bin/bash', '-o','pipefail','-c', $cmd) or $self->throw("Failed to run the command [/bin/sh -o pipefail -c $cmd]: $!");
     }
+
+    if ( exists($args{exit_on_error}) && !$args{exit_on_error} ) { return @out; }
 
     my $exit_status = $?;
     my $status = exists($args{require_status}) ? $args{require_status} : 0;
