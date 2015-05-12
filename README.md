@@ -62,7 +62,7 @@ The pipeline can be run in the daemon mode or from cron:
     # Run from cron
     */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -c config.conf -L config.lock'
 
-Example config files can be found in the *misc* directory of the distribution. The projects are small text files which define the input data, they may look like this:
+Example config files can be found in the *misc* directory of the distribution. The projects are small text files ("**.txt**" suffix is required!) which define the input data, they may look like this:
 
     # Where to send notification about job completion
     email: someone@somewhere.org 
