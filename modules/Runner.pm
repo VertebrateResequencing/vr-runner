@@ -131,8 +131,8 @@ sub new
     Args  : The system command line options are prefixed by "+" to distinguish from user-module options and must come first, before the user-module options 
                 +config <file>
                     Optional configuration file for overriding defaults
-				+debug <file1> <file2>
-					Run the freezed object <file1> overriding with keys from <file2>
+                +debug <file1> <file2>
+                    Run the freezed object <file1> overriding with keys from <file2>
                 +help
                     Summary of commands
                 +js <platform>
@@ -719,7 +719,7 @@ sub _get_unfinished_jobs
             $self->wait();
     Args  : <none>
                 Without arguments, waits for files registered by previous spawn calls.
-            <@files>
+            <array>
                 Extra files to wait for, in addition to those registered by spawn.
 
 =cut
@@ -932,9 +932,9 @@ sub wait
 
 =head2 all_done
 
-About : Exit with "all done" status
-Usage : $self->all_done();
-Args  : None
+    About : Exit with "all done" status
+    Usage : $self->all_done();
+    Args  : None
 
 =cut
 
@@ -1227,6 +1227,30 @@ sub debug
 =head1 AUTHORS
 
 petr.danecek@sanger
+
+=head1 COPYRIGHT AND LICENSE
+
+The MIT License
+
+Copyright (C) 2012-2015 Genome Research Ltd.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 =cut
 
