@@ -1,32 +1,13 @@
-#
-# Copyright (c) 2013, 2014 Genome Research Ltd. 
-# 
-# Authors: Allan Daly <ad7@sanger.ac.uk>
-#          Joshua Randall <jr17@sanger.ac.uk>
-#          Petr Danecek <pd3@sanger> 
-#
-# This program is free software: you can redistribute it and/or modify it under 
-# the terms of the GNU General Public License as published by the Free Software 
-# Foundation; either version 3 of the License, or (at your option) any later 
-# version. 
-#
-# This program is distributed in the hope that it will be useful, but WITHOUT 
-# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS 
-# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more 
-# details. 
-#
-# You should have received a copy of the GNU General Public License along with 
-# this program. If not, see <http://www.gnu.org/licenses/>.
-#
+=head1 NOTES
 
-# Checkpointing does not seem to be very robust, this is a list of unsolved
-# errors one might encounter:
-#   - 
-#   - The job's error output file contains the error message:
-#       Failed to open path/to/.jobs/name.w.chkp/[0-9]+/jobstate.context: No such file or directory 
-#   - The checkpoint output file path/to/.jobs/name.w.chkp/[0-9]+/echkpnt.err contains the error:
-#       Signal 18 (CONT) caught by ps (procps version 3.2.8).
-#
+    Checkpointing does not seem to be very robust, this is a list of unsolved
+    errors one might encounter:
+      - The job's error output file contains the error message:
+          Failed to open path/to/.jobs/name.w.chkp/[0-9]+/jobstate.context: No such file or directory 
+      - The checkpoint output file path/to/.jobs/name.w.chkp/[0-9]+/echkpnt.err contains the error:
+          Signal 18 (CONT) caught by ps (procps version 3.2.8).
+
+=cut
 
 package RunnerLSFCR;
 use base qw(RunnerLSF);
@@ -263,14 +244,32 @@ sub run_jobs
     }
 }
 
-
 =head1 AUTHORS
 
-Allan Daly <ad7@sanger.ac.uk>
-Joshua Randall <jr17@sanger.ac.uk>
-petr.danecek@sanger
+    Allan Daly <ad7@sanger.ac.uk>
+    Joshua Randall <jr17@sanger.ac.uk>
+    Petr Danecek <pd3@sanger> 
+
+=head1 COPYRIGHT AND LICENSE
+
+    Copyright (c) 2013, 2014 Genome Research Ltd. 
+    
+    This program is free software: you can redistribute it and/or modify it under 
+    the terms of the GNU General Public License as published by the Free Software 
+    Foundation; either version 3 of the License, or (at your option) any later 
+    version. 
+    
+    This program is distributed in the hope that it will be useful, but WITHOUT 
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS 
+    FOR A PARTICULAR PURPOSE. See the GNU General Public License for more 
+    details. 
+    
+    You should have received a copy of the GNU General Public License along with 
+    this program. If not, see <http://www.gnu.org/licenses/>.
 
 =cut
+
+
 
 1;
 
