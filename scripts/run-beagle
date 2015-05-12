@@ -474,7 +474,7 @@ sub beagle
     if ( !-e "$prefix.vcf.gz" or $$self{redo_beagle} )
     {
         $self->cmd(qq[mkdir -p $outdir]);
-        my $mem = $self->get_limits('memory') * 0.8;
+        my $mem = int($self->get_limits('memory') * 0.8);
         if ( $mem<=0 ) { $mem = 500; }
         my $known = defined $known_vcf ? "ref=$known_vcf" : '';
         if ( $known ne '' )
