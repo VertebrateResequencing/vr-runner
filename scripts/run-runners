@@ -171,21 +171,21 @@ sub list_projects
     opendir($dh, $$opts{input_dir}) or error("$$opts{input_dir}: $!");
     while (my $file = readdir($dh))
     {
-        if ( !($file =~/\.txt$/ ) ) { next; }
+        if ( $file =~/^\./ ) { next; }
+        if ( $file =~/~$/ ) { next; }
         $project = parse_project($opts,"$$opts{input_dir}/$file");
-        my $alias = $$project{name};
-        $alias =~ s/\.txt$//;
-        $$project{alias} = time() .'_'. $alias;
+        $$project{alias} = time() .'_'. $$project{name};
         $$project{file}  = $file;
 
         system("mkdir -p $$opts{work_dir}/$$project{alias}");
-        system("mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/");
-        if ( $? ) { confess "mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/"; }
+        system("mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}.txt");
+        if ( $? ) { confess "mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}.txt"; }
 
         push @projects, $project;
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
     closedir($dh);
+    if ( !@projects ) { print STDERR "No project files (*.txt) found in $$opts{input_dir}\n"; }
     return \@projects;
 }
 
