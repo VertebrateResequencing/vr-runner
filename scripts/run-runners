@@ -9,6 +9,9 @@
 #   # Where to send notification about job completion
 #   email: someone@somewhere.org
 #
+#   # Frequency (in seconds) with which to remind about failed jobs 
+#   err_period: 3600
+#
 #   # Any value given as "$(var_name)" in the config can be overriden.
 #   # The default value can be given as "$(var_name:default)"
 #   maxjobs: 200
@@ -368,7 +371,7 @@ sub run_task
 
             if ( exists($$job{status}{error}) && $status==$$job{status}{error} )
             {
-                send_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
+                send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
                 error("Failed: $cmd"); 
             }
 
@@ -378,7 +381,7 @@ sub run_task
             { 
                 if ( !exists($$job{status}{error}) )
                 { 
-                    send_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
+                    send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
                     error("Failed: $cmd"); 
                 }
                 last;
@@ -391,7 +394,7 @@ sub run_task
             }
             else 
             { 
-                send_email($project,"$task_name error","Unexpected return status: status ($?): $cmd\nProject $$project{name}\n");
+                send_err_email($project,"$task_name error","Unexpected return status: status ($?): $cmd\nProject $$project{name}\n");
                 error("Unexpected return status: $status ($?) .. $cmd"); 
             }
         }
@@ -407,4 +410,44 @@ sub send_email
     print $mh join('',@msg) . "\n";
     close($mh);
 }
+sub send_err_email
+{
+    my ($opts, $status, @msg) = @_;
+    if ( !exists($$opts{email}) ) { return; }
+    if ( exists($$opts{err_period}) )
+    {
+        my $err_file = "$$opts{dir}/$$opts{prefix}.err";
+        if ( -e $err_file ) 
+        {
+            if ( !update_after_delta($err_file,$$opts{err_period}) ) { return; }
+        }
+        open(my $fh,'>',$err_file) or error("$err_file: $!");
+        my $now = time();
+        print $fh $now;
+        close($fh) or error("$err_file: close failed");
+    }
+    send_email($opts, $status, @msg);
+}
+
+sub update_after_delta
+{
+    my ($err_file,$period) = @_;
+    my $now = time();
+    my $ret = open(my $fh,'<',$err_file);
+    if ( $ret )
+    {
+        my $then = <$fh>;
+        close($fh);
+        if ( $then )
+        {
+            chomp($then);
+            if ( $then + $period > $now ) { return 0; }
+        }
+    }
+    open($fh,'>',$err_file) or return 1;
+    print $fh $now;
+    close($fh);
+    return 1;
+}
+
 
