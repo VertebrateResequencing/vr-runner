@@ -62,14 +62,20 @@ The pipeline can be run in the daemon mode or from cron:
     # Run from cron
     */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -c config.conf -L config.lock'
 
-Example config files can be found in the *misc* directory of the distribution. The projects are small text files ("**.txt**" suffix is required!) which define the input data, they may look like this:
+Example config files can be found in the *misc* directory of the distribution. The projects are small text files which define the input data, they may look like this:
 
     # Where to send notification about job completion
     email: someone@somewhere.org 
     
+    # Frequency (in seconds) with which to remind about failed jobs. This is to avoid
+    # too many emails in your mailbox
+    err_period: 3600
+    
     # Any value given as "$(var_name)" in the runner's config can be overriden
     # The default value can be given as "$(var_name:default)"
     maxjobs: 200
+
+Copy the project file in the input dropbox directory and **run-runners** will do the rest. Note that files starting with "**.**" (dot) or ending with "**~**" (tilde) will be ignored!
 
 
 Runner options
