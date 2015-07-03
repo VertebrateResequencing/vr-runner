@@ -188,7 +188,6 @@ sub list_projects
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
     closedir($dh);
-    if ( !@projects ) { print STDERR "No project files (*.txt) found in $$opts{input_dir}\n"; }
     return \@projects;
 }
 
