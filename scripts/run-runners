@@ -69,6 +69,7 @@ sub error
         "Usage: run-runners [OPTIONS]\n",
         "Options:\n",
         "   -c, --config <file>     config file\n",
+        "   -i, --ignore-failures   continue with other projects even if one keeps failing\n",
         "   -l, --loop <int>        run in daemon mode, check the status every <int> seconds\n",
         "   -L, --lock <file>       exit if another instance is already running\n",
         "   -n, --nmax <int>        maximum number of projects to run simultaneously\n",
@@ -83,6 +84,7 @@ sub parse_params
     my $opts = { nmax_projects=>1 };
     while (defined(my $arg=shift(@ARGV)))
     {
+        if ( $arg eq '-i' || $arg eq '--ignore-failures' ) { $$opts{ignore_failures}=1; next }
         if ( $arg eq '-n' || $arg eq '--nmax' ) { $$opts{nmax_projects}=shift(@ARGV); next }
         if ( $arg eq '-L' || $arg eq '--lock' ) { $$opts{lock}=shift(@ARGV); next }
         if ( $arg eq '-l' || $arg eq '--loop' ) { $$opts{loop}=shift(@ARGV); next }
@@ -371,6 +373,11 @@ sub run_task
             if ( exists($$job{status}{error}) && $status==$$job{status}{error} )
             {
                 send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
+                if ( $$opts{ignore_failures} )
+                {
+                    print STDERR "Failed: $cmd\n\n";
+                    return 0;   # Act as if the task was not finished
+                }
                 error("Failed: $cmd"); 
             }
 
@@ -381,6 +388,11 @@ sub run_task
                 if ( !exists($$job{status}{error}) )
                 { 
                     send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
+                    if ( $$opts{ignore_failures} )
+                    {
+                        print STDERR "Failed: $cmd\n\n";
+                        return 0;   # Act as if the task was not finished
+                    }
                     error("Failed: $cmd"); 
                 }
                 last;
@@ -394,6 +406,11 @@ sub run_task
             else 
             { 
                 send_err_email($project,"$task_name error","Unexpected return status: status ($?): $cmd\nProject $$project{name}\n");
+                if ( $$opts{ignore_failures} )
+                {
+                    print STDERR "Failed: $cmd\n\n";
+                    return 0;   # Act as if the task was not finished
+                }
                 error("Unexpected return status: $status ($?) .. $cmd"); 
             }
         }
