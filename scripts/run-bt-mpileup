@@ -1,0 +1,676 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{mpileup}        = 'bcftools mpileup -t DP,DV -C50 -pm3 -F0.2 -d10000';
+    $$self{call}           = 'bcftools call -vm -f GQ';
+    $$self{norm}           = 'bcftools norm';
+    $$self{index}          = 'bcftools index';
+    $$self{vcfstats}       = 'bcftools stats -c both -s -';
+    $$self{filter}         = 'bcftools filter -m+ -sLowQual -e"%QUAL<=10" -g3 -G10';
+    $$self{concat}         = 'bcftools concat';
+    $$self{htsfile}        = 'htsfile';
+    $$self{chunk_size}     = 1_000_000;
+	$$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            #  config file to get rid of the warnings.
+            #
+            # What changed since version:
+            #   1377691623 .. New version of bcftools requires sample files to be prefixed with ':'.
+            #   1394700014 .. Switched from "vcf-concat" to "bcftools concat"
+            #   1427807557 .. Major changes: the "pops", "sample_list", and "bams" keys were replaced by "alns",
+            #                   "ploidy" changed, "chroms" removed, "regions" changed, "bcftools" replaced by
+            #                   "call" and added "index", "filter" and "vcfstats" changed.
+            #
+            version  => '] .$$self{config_version}. q[',
+
+            # Add -P ILLUMINA or -P SLX if the BAMs contain also reads from different platforms. 
+            mpileup  => '] .$$self{mpileup}.  q[',
+            call     => '] .$$self{call}. q[',
+            norm     => '] .$$self{norm}. q[',
+            index    => '] .$$self{index}. q[',
+            vcfstats => '] .$$self{vcfstats}. q[',
+            filter   => '] .$$self{filter}. q[',
+            concat   => '] .$$self{concat}. q[',
+            htsfile  => '] .$$self{htsfile}. q[',
+ 
+            fa_ref   => 'human_g1k_v37.fasta',
+
+            # Optional, for frameshift stats only
+            exons    => '/nfs/users/nfs_p/pd3/sandbox/other/20120425-inframe-indels/CCDS-human-GRCh37p6.sorted.txt.gz',
+
+            # alns: A single bam/cram file, a list of bam/cram files in a file,
+            # or a hash which defines the population structure.
+            # When the "alns" key is not a hash, the samples are grouped by the
+            # @RG:SM tag from across all bams and called jointly. 
+            # Otherwise, the hash controls the sex, output sample names, and
+            # samples/bams to be called jointly. The following columns are recognised:
+            #   grp  .. group name. Files from the same group will be called jointly. If not given, samples are called jointly.
+            #   aln  .. bam/cram file name
+            #   sex  .. one of the sexes defined in 'ploidy'. If not given, 'assumed_sex' is used.
+            #   smpl .. sample name to call
+            #   disp .. sample display name (i.e., rename sample)
+            #
+            # alns => 'file.bam',
+            # alns => 'list_of_files.txt',
+            # alns => { fname=>'file.list', columns=>['grp','aln']},
+
+            # Restrict calling to the listed regions only. Provide either an
+            # array or a file name with a list of regions (whitespace delimited
+            # file with the columns CHR,FROM,TO).
+            #
+            # regions => 'regions_list.txt',
+            # regions => [ qw(1:1-1000000 1:1000001-5000000) ],
+            regions => [ qw(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X Y) ],
+
+            assumed_sex    => 'F',   # The default sex, see also 'ploidy' definitions
+            merge_chroms   => 1,     # Create whole-genome VCF or stop at per-chromosome VCFs?
+            merge_groups   => 0,     # After calling each group separately, create a single VCF?
+            chunk_size     => ] .$$self{chunk_size}. q[,
+            do_clean       => 1,     # Remove runner's temporary files
+            shuffle_chunks => 0,     # Process chunks in random order to randomize disk access
+            debug_chunks   => 0,
+
+            # File or array with ploidy definitions in the format accepted by
+            # bcftools. If not defined, the default ploidy is used, unlisted
+            # regions are diploid:
+            #       X 1 60000 M 1
+            #       X 2699521 154931043 M 1
+            #       Y 1 59373566 M 1
+            #       Y 1 59373566 F 0
+            #       MT 1 16569 M 1
+            #       MT 1 16569 F 1
+            #
+            ploidy => undef,
+            
+            limits   => { runtime=>24*60 },
+    ]."\n";
+
+    $$self{usage} .= 
+        "Usage: run-mpileup\n" .
+        "Options:\n" .
+        "   -c, --clean             Clean all temporary files (and do nothing else)\n" .
+        "   -m, --mrProper          Clean all temporary files, including the population directories and BCFs, leaving only toplevel VCFs (and do nothing else)\n" .
+        "   -o, --outdir <dir>      Output directory\n" .
+        "       --debug <chr:pos>   Create sample file with correct ploidy for this site and show commands to run (for debugging)\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-c' or $arg eq '--clean' ) { $$self{clean}=1; next; }
+        if ( $arg eq '-m' or $arg eq '--mrProper' ) { $$self{mrProper}=1; next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if (                 $arg eq '--debug' ) { $$self{debug}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected -o option."); }
+
+    # This lengthy code checks if mandatory parameters are present and fills the defaults issuing warnings when doing so.
+	if ( !exists($$self{version}) or $$self{version} ne $$self{config_version} )
+	{
+		$self->throw("Warning: Your config file may be out of date, the latest version key is \"$$self{config_version}\". Please run with +sampleconf to see what changed.\n");
+	}
+    if ( !exists($$self{alns}) ) { $self->throw("The 'alns' config key is not present\n"); }
+    if ( !exists($$self{fa_ref}) ) { $self->throw("The 'fa_ref' config key is not present\n"); }
+    if ( !exists($$self{ploidy}) ) 
+    { 
+        $$self{ploidy} = 
+        [
+            'X 1 60000 M 1',
+            'X 2699521 154931043 M 1',
+            'Y 1 59373566 M 1',
+            'Y 1 59373566 F 0',
+            'MT 1 16569 M 1',
+            'MT 1 16569 F 1'
+        ];
+    }
+    if ( $$self{clean} ) 
+    { 
+        $self->clean($$self{outdir});
+        $self->all_done;
+    }
+    if ( $$self{mrProper} )
+    {
+        $self->mrProper($$self{outdir});
+        $self->all_done;
+    }
+
+    if ( $$self{debug} ) { $self->debug_commands(); $self->all_done; }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    $self->save_config();
+
+    my $outdir = $$self{outdir};
+    if ( $self->is_finished("$outdir/all_done") ) { $self->all_done; }
+
+    my $groups = $self->init_groups();
+    my $chunks = $self->init_chunks();
+    #if ( !$self->is_finished("$outdir/sanity_checked") ) { $self->check_sanity; }
+
+    $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+    my %chrs = ();
+    for my $group (keys %$groups)
+    {
+        for my $chunk (@$chunks)
+        {
+            my $chr  = $$chunk{chr};
+            my $from = $$chunk{from};
+            my $to   = $$chunk{to};
+            $chrs{$chr} = 1;
+            if ( $self->is_finished("$outdir/$group/$chr.bcf") ) { next; }
+            if ( $self->is_finished("$outdir/$group.bcf") ) { next; }
+            $self->spawn('call_variants',"$outdir/$group/$chr/$chr:$from-$to.bcf",$$groups{$group},$chunk);
+        }
+    }
+    $self->wait;
+    $self->set_limits(runtime=>undef);
+
+
+    # Concatenate chunks and apply filtering
+    my @vcfs = ();
+    for my $group (keys %$groups)
+    {
+        if ( $$self{merge_chroms} )
+        {
+            push @vcfs, "$outdir/$group.bcf";
+            $self->spawn('merge_chunks',"$outdir/$group.bcf",$$groups{$group},$chunks);
+        }
+        else
+        {
+            for my $chr (keys %chrs)
+            {
+                push @vcfs, "$outdir/$group/$chr.bcf";
+                $self->spawn('merge_chunks',"$outdir/$group/$chr.bcf",$$groups{$group},$chunks,$chr);
+            }
+        }
+    }
+    $self->wait;
+
+    
+    # Run summary stats
+    for my $vcf (@vcfs)
+    {
+        $self->spawn('vcf_stats',"$vcf.filt.vchk",$vcf,'-f PASS');
+        $self->spawn('vcf_stats',"$vcf.vchk",$vcf);
+    }
+    $self->wait;
+
+    if ( $$self{do_clean} ) { $self->clean($outdir); }
+    $self->all_done;
+}
+
+sub mrProper
+{
+    my ($self,$outdir) = @_;
+    for my $pop (keys %{$$self{pops}})
+    {
+        $self->cmd("rm -rf $outdir/$pop");
+    }
+    $self->clean($outdir);
+}
+
+sub clean
+{
+    my ($self,$outdir) = @_;
+    $self->SUPER::clean($outdir);
+
+    my $groups = $self->init_groups();
+    my $chunks = $self->init_chunks();
+    my %chrs = ();
+    for my $group (keys %$groups)
+    {
+        for my $chunk (@$chunks)
+        {
+            my $chr  = $$chunk{chr};
+            my $from = $$chunk{from};
+            my $to   = $$chunk{to};
+            $chrs{$chr} = 1;
+            for my $suffix (qw(samples bcf bcf.csi))
+            {
+                my $file = "$outdir/$group/$chr/$chr:$from-$to.$suffix";
+                unlink($file) unless !-e $file;
+            }
+        }
+        for my $chr (keys %chrs)
+        {
+            rmdir("$outdir/$group/$chr");
+            unlink("$outdir/$group/$chr.list") unless (!-e "$outdir/$group/$chr.list");
+        }
+        unlink("$outdir/$group/alns.txt") unless (!-e "$outdir/$group/alns.txt");
+        unlink("$outdir/$group.bcf.list") unless (!-e "$outdir/$group.bcf.list");
+        rmdir("$outdir/$group");
+    }
+}
+
+sub runtime_stats
+{
+    my ($self,$outfile) = @_;
+    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
+    open(my $fh,'>',"$outfile.part/info.txt") or $self->throw("$outfile.part/info.txt: $!");
+    print $fh $$self{_about};
+    close($fh);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub save_config
+{
+    my ($self) = @_;
+    my $src = $$self{_config};
+    my $dst = "$$self{outdir}/mpileup.conf";
+    if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst");
+}
+
+sub cmd
+{
+    my ($self,$cmd) = @_;
+    $cmd =~ s/\n/ /g;
+    return $self->SUPER::cmd($cmd,verbose=>1);
+}
+
+sub add_to_group
+{
+    my ($self,$groups,$name,$file) = @_;
+    push @{$$groups{$name}{list}}, { aln=>$file };
+}
+sub init_groups
+{
+    my ($self) = @_;
+    my $groups = {};
+    if ( ref($$self{alns}) eq 'HASH' )
+    {
+        my %alwd = map { $_ => 1 } ('grp','aln','sex','smpl','disp');
+        my %cols = ();
+        for (my $i=0; $i<@{$$self{alns}{columns}}; $i++)
+        {
+            my $col = $$self{alns}{columns}[$i];
+            if ( exists($cols{$col}) ) { $self->throw("Duplicate columns in 'alns' definition\n"); }
+            if ( !exists($alwd{$col}) ) { $self->throw("The column '$col' is not supported yet\n"); }
+            $cols{$col} = $i;
+        }
+        my $ncols = scalar keys %cols;
+        if ( !exists($cols{aln}) ) { $self->throw("Missing the 'aln' column in 'alns'\n"); }
+        open(my $fh,'<',$$self{alns}{fname}) or $self->throw("$$self{alns}{fname}: $!");
+        while (my $line=<$fh>)
+        {
+            if ( $line=~/^#/ or $line=~/^\s*$/ ) { next; }
+            my @items = split(/\s+/,$line);
+            if ( scalar @items != $ncols ) { $self->throw("Wrong number of columns, the \"alns\" config key does correspond to $$self{alns}{fname}\n"); }
+            chomp($items[-1]);
+            my $grp  = exists($cols{grp}) ? $items[$cols{grp}] : 'all';
+            my $smpl = {};
+            for my $col (keys %cols) { $$smpl{$col} = $items[$cols{$col}]; }
+            push @{$$groups{$grp}{list}}, $smpl;
+        }
+        close($fh) or $self->throw("close failed: $$self{alns}{fname}");
+    }
+    else
+    {
+        my @ftype = $self->cmd("$$self{htsfile} $$self{alns}",verbose=>1);
+        if ( $ftype[0]=~/:\tBAM/ or $ftype[0] =~/:\tCRAM/ )
+        {
+            # we have a single bam/cram file
+            $self->add_to_group($groups,'all',$$self{alns});
+        }
+        else
+        {
+            # list of files
+            open(my $fh,'<',$$self{alns}) or $self->throw("$$self{alns}: $!");
+            while (my $line=<$fh>)
+            {
+                if ( $line=~/^#/ or $line=~/^\s*$/ ) { next; }
+                chomp($line);
+                $self->add_to_group($groups,'all',$line);
+            }
+            close($fh) or $self->throw("close failed: $$self{alns}");
+        }
+    }
+    for my $group (keys %$groups)
+    {
+        $$groups{$group}{name} = $group;
+        $self->write_group($$self{outdir},$$groups{$group});
+    }
+    return $groups;
+}
+sub write_group
+{
+    my ($self,$dir,$group) = @_;
+    my $name = $$group{name};
+    $$group{alns} = "$dir/$name/alns.txt";
+
+    $self->write_samples("$dir/$name",$group);
+
+    my $outfile = $$group{alns};
+    if ( !$self->is_finished($outfile) )
+    {
+        my $fh = $self->open_file("$outfile.part");
+        for my $aln (@{$$group{list}})
+        {
+            print $fh "$$aln{aln}\n";
+        }
+        close($fh);
+        rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+    }
+}
+sub write_samples
+{
+    my ($self,$dirname,$group) = @_;
+    my $has_sex  = 0;   # is list of samples needed?
+    my $has_disp = 0;   # need the samples be renamed?
+    my @samples  = ();
+    for my $sample (@{$$group{list}})
+    {
+        if ( exists($$sample{smpl}) ) { push @samples, $$sample{smpl}; }
+        if ( exists($$sample{sex}) ) { $has_sex++; }
+        if ( exists($$sample{disp}) && $$sample{disp} ne $$sample{smpl} ) { $has_disp++; }
+    }
+    if ( @samples )
+    {
+        $$group{subset_samples} = \@samples;
+    }
+    if ( $has_sex )
+    {
+        if ( $has_sex != scalar @{$$group{list}} ) { $self->throw("Fix me: sex expected with all or none of the samples\n"); }
+        my $fname = "$dirname/samples.txt";
+        if ( !$self->is_finished($fname) )
+        {
+            my $fh = $self->open_file($fname);
+            for my $sample (@{$$group{list}})
+            {
+                print $fh "$$sample{smpl}\t$$sample{sex}\n";
+            }
+            close($fh) or $self->throw("close failed: $fname");
+        }
+        $$group{samples} = $fname;
+    }
+    if ( $has_disp )
+    {
+        my $fname = "$dirname/samples.rename.txt";
+        if ( !$self->is_finished($fname) )
+        {
+            my $fh = $self->open_file($fname);
+            for my $sample (@{$$group{list}})
+            {
+                if ( exists($$sample{disp}) ) { print $fh "$$sample{smpl}\t$$sample{disp}\n"; }
+            }
+            close($fh) or $self->throw("close failed: $fname");
+        }
+        $$group{rename_samples} = $fname;
+    }
+}
+
+sub check_sanity
+{
+    my ($self) = @_;
+
+$self->warn("TODO: check_sanity. Skipping the sanity checkign for now, make sure that -P corresponds to PL!\n");
+return;
+
+    # Check that the -P option corresponds to PL in the BAMs
+    if ( !($$self{mpileup}=~/\s+-\S*P\s+(\S+)/) ) { return; }
+    my %pl = map { $_=>1 } split(/,/,$1);
+    my %bam_pls = ();
+
+    open(my $fh,'<',$$self{bams}) or $self->throw("$$self{bams}: $!");
+    while (my $bam=<$fh>)
+    {
+        chomp($bam);
+        my @rgs = `samtools view -H $bam | grep ^\@RG`;
+        for my $rg (@rgs)
+        {
+            if ( !($rg=~/\tPL:(\S+)/) ) { next; }
+            $bam_pls{$1} = 1;
+        }
+    }
+    close($fh);
+
+    for my $pl (keys %pl)
+    {
+        if ( !exists($bam_pls{$pl}) ) { $self->throw("The platform \"$pl\" not present in any of the BAMs.\n"); }
+    }
+    `mkdir -p $$self{outdir}`;
+    $self->cmd("touch $$self{outdir}/sanity_checked");
+}
+
+sub open_file
+{
+    my ($self,$file) = @_;
+    if ( ($file=~m{^(.+)/[^/]+$}) && ! -d $1 ) { $self->cmd("mkdir -p $1"); }
+    open(my $fh,'>',$file) or $self->throw("$file: $!");
+    return $fh;
+}
+
+sub init_chunks
+{
+    my ($self) = @_;
+
+    my $regions = [];
+    if ( ref($$self{regions}) eq 'ARRAY' )
+    {
+        my $lengths;
+        for my $reg (@{$$self{regions}})
+        {
+            my ($chr,$start,$end);
+            if ( $reg=~/^([^:]+):+([^-]+)-(.+)$/ ) { $chr=$1; $start=$2; $end=$3; }
+            elsif ( $reg=~/^([^:]+)$/ )
+            {
+                $chr = $1;  
+                if ( !defined $lengths ) { $lengths = $self->read_fai("$$self{fa_ref}.fai"); }
+                if ( !exists($$lengths{$chr}) ) { $self->throw("Chromosome \"$chr\" not in $$self{fa_ref}.fai?"); }
+                $start = 1;
+                $end = $$lengths{$chr};
+            }
+            else { $self->throw("Could not parse the region: $reg\n"); }
+            push @$regions, { chr=>$chr, from=>$start, to=>$end };
+        }
+    }
+    else
+    {
+        $regions = read_regions($$self{regions});
+    }
+
+    my @chunks;
+    for my $region (@$regions)
+    {
+        my $pos     = $$region{from};
+        my $end_pos = $$region{to};
+        while ($pos<$end_pos)
+        {
+            my $from = $pos;
+            my $to   = $from+$$self{chunk_size}-1;
+            if ( $to>$end_pos ) { $to=$end_pos; }
+
+            push @chunks, { chr=>$$region{chr}, from=>$from, to=>$to };
+
+            $pos += $$self{chunk_size};
+            if ( $pos<1 ) { $self->throw("The split size too small [$$self{chunk_size}]?\n"); }
+
+            if ( $$self{debug_chunks} && scalar @chunks>=$$self{debug_chunks} ) { return \@chunks; }
+        }
+    }
+
+    if ( $$self{shuffle_chunks} )
+    {
+        use Math::Random;
+        random_set_seed_from_phrase(1,1);
+        @chunks = random_permutation(@chunks);
+    }
+
+    return \@chunks;
+}
+
+sub read_regions
+{
+    my ($self,$file) = @_;
+    open(my $fh,'<',$file) or $self->throw("$file: $!"); 
+    my @regions;
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        if ( !($line=~/^(\S+)\s+(\d+)\s+(\d+)\s*$/) ) { $self->throw("Could not parse the regions file $file: [$line]"); }
+        push @regions, { chr=>$1, from=>$2, to=>$3 };
+    }
+    return \@regions;
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    # Determine the chromosomes and their lengths
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    my %chr_lengths;
+    while (my $line=<$fh>)
+    {
+        my @items = split(/\s+/,$line);
+        my $chr = $items[0];
+        my $len = $items[1];
+        $chr_lengths{$chr} = $len;
+    }
+    close($fh);
+    if ( !scalar keys %chr_lengths ) { $self->throw("No sequences read from $fai??"); }
+    return \%chr_lengths;
+}
+
+sub call_variants
+{
+    my ($self,$outfile,$group,$chunk) = @_;
+
+    my $chr  = $$chunk{chr};
+    my $from = $$chunk{from};
+    my $to   = $$chunk{to};
+
+    my $outdir = $$self{outdir};
+    my $alns   = $$group{alns};
+    my $smpl_file   = exists($$group{samples}) ? "-S $$group{samples}" : '';
+
+    # Hmm, this is good for subsetting multisample BAMs, but when running on multiple
+    # single-sample files and only specifying sex, all samples are unnecessarily passed
+    # to mpileup. This needs to be smarter, disabling for now.
+    #
+    #   my $smpl_subset = exists($$group{subset_samples}) ? "-s " . join(',',@{$$group{subset_samples}}) : '';
+    #
+    my $smpl_subset = '';
+
+    my $cmd = 
+        "$$self{mpileup} $smpl_subset -r $chr:$from-$to -b $alns -f $$self{fa_ref} -Ou |" .
+        "$$self{call} $smpl_file";
+    $cmd .= 
+        " -Ou | $$self{norm} -f $$self{fa_ref}" unless !$$self{norm};
+    $cmd .= 
+        " -Ob -o $outfile.part";
+    $self->cmd($cmd);
+
+    if ( exists($$group{rename_samples}) )
+    {
+        $cmd = "$$self{reheader} -s $$group{rename_samples} -o $outfile.tmp $outfile.part";
+        $self->cmd($cmd);
+        rename("$outfile.tmp","$outfile.part") or $self->throw("rename $outfile.tmp $outfile.part: $!");
+    }
+
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub debug_commands
+{
+    my ($self) = @_;
+    my ($chr,$pos) = split(/:/, $$self{debug});
+    my $groups = $self->init_groups();
+    my $group  = (keys %$groups)[0];
+    my $alns   = $$groups{$group}{alns};
+
+    my $cmd = 
+        "$$self{mpileup} -r $chr:$pos-$pos -b $alns -f $$self{fa_ref} -Ou |" .
+        "$$self{call}";
+
+    print "$cmd\n";
+}
+
+sub merge_chunks
+{
+    my ($self,$outfile,$group,$chunks,$chr) = @_;
+
+    open(my $fh,'>',"$outfile.list") or $self->throw("$outfile.list: $!");
+    for my $chunk (@$chunks)
+    {
+        if ( defined $chr && $$chunk{chr} ne $chr ) { next; }
+        print $fh "$$self{outdir}/$$group{name}/$$chunk{chr}/$$chunk{chr}:$$chunk{from}-$$chunk{to}.bcf\n";
+    }
+    close($fh) or $self->throw("close failed: $outfile.list");
+
+    my $cmd = "$$self{concat} -f $outfile.list";
+    if ( exists($$self{filter}) && defined($$self{filter}) )
+    {
+        $cmd .= " | $$self{filter}"
+    }
+    $cmd .= " -Ob -o $outfile.part";
+    $self->cmd($cmd);
+
+    $self->index_part($outfile);
+}
+
+sub index_part
+{
+    my ($self,$vcf) = @_;
+    $self->cmd("$$self{index} $vcf.part");
+    if ( -e "$vcf.part.tbi" )
+    {
+        rename("$vcf.part.tbi","$vcf.tbi");
+        rename("$vcf.part",$vcf);
+    }
+    else
+    {
+        rename("$vcf.part.csi","$vcf.csi");
+        rename("$vcf.part",$vcf);
+    }
+}
+
+sub vcf_stats
+{
+    my ($self,$outfile,$vcf,$args) = @_;
+    $args .= " -F $$self{fa_ref}";
+    if ( exists($$self{exons}) ) { $args .= " -E $$self{exons}"; }
+    $self->cmd("$$self{vcfstats} $args $vcf > $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
