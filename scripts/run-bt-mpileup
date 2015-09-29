@@ -27,6 +27,7 @@ sub new
     $$self{mpileup}        = 'bcftools mpileup -t DP,DV -C50 -pm3 -F0.2 -d10000';
     $$self{call}           = 'bcftools call -vm -f GQ';
     $$self{norm}           = 'bcftools norm';
+    $$self{reheader}       = 'bcftools reheader';
     $$self{index}          = 'bcftools index';
     $$self{vcfstats}       = 'bcftools stats -c both -s -';
     $$self{filter}         = 'bcftools filter -m+ -sLowQual -e"%QUAL<=10" -g3 -G10';
@@ -51,6 +52,7 @@ sub new
             mpileup  => '] .$$self{mpileup}.  q[',
             call     => '] .$$self{call}. q[',
             norm     => '] .$$self{norm}. q[',
+            reheader => '] .$$self{reheader}. q[',
             index    => '] .$$self{index}. q[',
             vcfstats => '] .$$self{vcfstats}. q[',
             filter   => '] .$$self{filter}. q[',
