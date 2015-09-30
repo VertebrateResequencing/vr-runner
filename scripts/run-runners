@@ -178,6 +178,7 @@ sub list_projects
     {
         if ( $file =~/^\./ ) { next; }
         if ( $file =~/~$/ ) { next; }
+        if ( $file =~/\.err$/ ) { next; }
         $project = parse_project($opts,"$$opts{input_dir}/$file");
         $$project{alias} = time() .'_'. $$project{name};
         $$project{file}  = $file;
