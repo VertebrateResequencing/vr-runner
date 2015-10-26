@@ -164,7 +164,7 @@ sub list_projects
     while (my $dir = readdir($dh))
     {
         if ( !-d "$$opts{work_dir}/$dir" or !($dir=~/^\d+_(.*)$/ ) ) { next; }
-        $project = parse_project($opts,"$$opts{work_dir}/$dir/$1.txt");
+        $project = parse_project($opts,"$$opts{work_dir}/$dir/$1");
         push @projects, $project;
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
@@ -184,8 +184,8 @@ sub list_projects
         $$project{file}  = $file;
 
         system("mkdir -p $$opts{work_dir}/$$project{alias}");
-        system("mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}.txt");
-        if ( $? ) { confess "mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}.txt"; }
+        system("mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}");
+        if ( $? ) { confess "mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}"; }
 
         push @projects, $project;
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
@@ -200,7 +200,6 @@ sub clean_project
 
     my $name = $$project{name};
     debug_msg($opts,"Cleaning project: $name\n");
-    $name =~ s/\.txt$//;
     $$project{prefix} = "$$opts{work_dir}/$$project{alias}/$name";
 
     for my $outdir (keys %{$$opts{outputs}})
@@ -310,7 +309,6 @@ sub run_project
     my ($opts,$project) = @_;
     my $name = $$project{name};
     debug_msg($opts,"Checking status: $name\n");
-    $name =~ s/\.txt$//;
     for my $task (@{$$opts{tasks}})
     {
         my $prefix = "$$opts{work_dir}/$$project{alias}/$name";
