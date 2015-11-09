@@ -1118,7 +1118,7 @@ sub _mkdir
                 The command to be executed
             <hash>
                 Optional arguments: 
-                - exit_on_error     .. if set, don't throw on errors [0]
+                - exit_on_error     .. if set to 0, don't throw on errors. If not given, exit_on_error=1 is assumed
                 - require_status    .. throw if exit status is different [0]
                 - verbose           .. print command to STDERR before executing [0]
 
