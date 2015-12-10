@@ -2,44 +2,14 @@
 #
 # Author: petr.danecek@sanger
 #
-# This script/pipeline is intended for chaining multiple runners. It runs as a
-# daemon and waits for new projects to appear in dropbox directory ("input_dir").
-# The projects are small text files which define the input data, such as:
-#
-#   # Where to send notification about job completion
-#   email: someone@somewhere.org
-#
-#   # Frequency (in seconds) with which to remind about failed jobs 
-#   err_period: 3600
-#
-#   # Any value given as "$(var_name)" in the config can be overriden.
-#   # The default value can be given as "$(var_name:default)"
-#   maxjobs: 200
-#
-# After the runners finish, the result is moved to output directory and an
-# email is sent to notify the user.
-#
-# The pipeline chain can be run from the command line
-#
-#   run-runners -v -c config.conf
-#
-# or as a cron job:
-#
-#   */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -c config.conf -L config.lock'    
-#
-# The vr-wrapper scripts can be used to set environment variables without having
-# to change user's profile. It may look as this:
-#
-#   #!/bin/bash
-#   export PATH="$HOME/git/vr-runner/scripts:$PATH"
-#   export PERL5LIB="$HOME/git/vr-runner/modules:$PERL5LIB"
-#   
+# See run-runners --usage for a detailed help.
 #
 
 use strict;
 use warnings;
 use Carp;
 use Cwd;
+use IPC::Run3;
 
 my $opts = parse_params();
 
@@ -52,7 +22,7 @@ while (1)
         run_project($opts,$project);
     }
     if ( !$$opts{loop} ) { last; }
-    print STDERR "sleeping..\n" unless !$$opts{verbose};
+    print STDERR "sleeping $$opts{loop} seconds..\n" unless !$$opts{verbose};
     sleep($$opts{loop});
 }
 remove_lock($opts);
@@ -66,15 +36,20 @@ sub error
     my (@msg) = @_;
     if ( scalar @msg ) { confess @msg; }
     print 
+        "About: Maintain a dropbox-style runner chains.\n",
         "Usage: run-runners [OPTIONS]\n",
         "Options:\n",
-        "   -c, --config <file>     config file\n",
+        "   -d, --dropbox <prefix>  prefix to dropbox directory (read \"run-runners --usage\" first!)\n",
         "   -i, --ignore-failures   continue with other projects even if one keeps failing\n",
         "   -l, --loop <int>        run in daemon mode, check the status every <int> seconds\n",
         "   -L, --lock <file>       exit if another instance is already running\n",
         "   -n, --nmax <int>        maximum number of projects to run simultaneously\n",
-        "   -v, --verbose           print what's been done\n",
+        "   -u, --usage             print detailed usage explanation\n",
+        "   -v, --verbose           increase verbosity by giving multiple times\n",
         "   -h, -?, --help          this help message\n",
+        "Examples:\n",
+        "   run-runners --usage | less          # detailed usage explanation\n",
+        "   run-runners -v -d prefix -l 300     # loop with sleep cycles of 300 seconds\n",
         "\n";
     exit -1;
 }
@@ -84,26 +59,128 @@ sub parse_params
     my $opts = { nmax_projects=>1 };
     while (defined(my $arg=shift(@ARGV)))
     {
+        if ( $arg eq '-u' || $arg eq '--usage' ) { detailed_usage(); exit; }
+        if ( $arg eq '-d' || $arg eq '--dropbox' ) { $$opts{dropbox}=shift(@ARGV); next }
         if ( $arg eq '-i' || $arg eq '--ignore-failures' ) { $$opts{ignore_failures}=1; next }
         if ( $arg eq '-n' || $arg eq '--nmax' ) { $$opts{nmax_projects}=shift(@ARGV); next }
         if ( $arg eq '-L' || $arg eq '--lock' ) { $$opts{lock}=shift(@ARGV); next }
         if ( $arg eq '-l' || $arg eq '--loop' ) { $$opts{loop}=shift(@ARGV); next }
-        if ( $arg eq '-c' || $arg eq '--config' ) { $$opts{config}=shift(@ARGV); next }
-        if ( $arg eq '-v' || $arg eq '--verbose' ) { $$opts{verbose}=1; next }
+        if ( $arg eq '-v' || $arg eq '--verbose' ) { $$opts{verbose}++; next }
         if ( $arg eq '-?' || $arg eq '-h' || $arg eq '--help' ) { error(); }
         error("Unknown parameter \"$arg\". Run -h for help.\n");
     }
-    if ( !exists($$opts{config}) ) { error("Missing the -c option.\n") }
-    my %x = do "$$opts{config}";
-    if ( $@ ) { error("do $$opts{config}: $@\n"); }
-    %$opts = (%$opts,%x);
+    if ( !exists($$opts{dropbox}) ) { error("Missing the --dropbox option.\n"); }
 
-    if ( !-e $$opts{work_dir} ) { `mkdir -p $$opts{work_dir}`; }
-    if ( !-e $$opts{input_dir} ) { `mkdir -p $$opts{input_dir}`; }
-    if ( !-e $$opts{output_dir} ) { `mkdir -p $$opts{output_dir}`; }
+    $$opts{dropbox_tmp}  = "$$opts{dropbox}.tmp";
+    $$opts{dropbox_in}   = "$$opts{dropbox}.in";
+    $$opts{dropbox_out}  = "$$opts{dropbox}.out";
+    $$opts{dropbox_conf} = "$$opts{dropbox}.conf";
+
+    if ( !-d $$opts{dropbox_conf} ) { error("Incorrect dropbox prefix, the directory not found: $$opts{dropbox_conf}\n\n"); }
+    if ( !-e $$opts{dropbox_in} ) { `mkdir -p $$opts{dropbox_in}`; }
+    if ( !-e $$opts{dropbox_out} ) { `mkdir -p $$opts{dropbox_out}`; }
+    if ( !-e $$opts{dropbox_tmp} ) { `mkdir -p $$opts{dropbox_tmp}`; }
 
     return $opts;
 }
+
+sub detailed_usage
+{
+    print << "EOT";
+
+ Runner pipelines
+ ----------------
+
+ This lightweight pipeline framework is intended for chaining multiple runners.
+ It runs as a daemon and waits for new projects to appear in a dropbox
+ directory. After completion, the results appear in output directory and the
+ user is notified by an email. Multiple users can use the same dropbox to run
+ different pipelines at the same time.
+ 
+ The following directory structure is assumed:
+ 
+   prefix.conf .. config directory which contains pipeline definitions. 
+                   Typically this is a symbolic link to the vr-runner/misc
+                   install directory.  This is the only requirement, the rest
+                   is created automatically by the pipeline
+   prefix.in   .. dropbox input directory, drop your project here
+   prefix.out  .. output directory, the result will appear here
+   prefix.tmp  .. working directory
+ 
+ 
+ Each pipeline chain consists of a series of "steps" defined in the misc/chain.*.conf
+ and misc/step.*.conf files. These configs can be used as they are. If well
+ written, the user only needs to create a small project description and place it
+ in the dropbox input directory:
+
+    config:          chain.gtcheck.conf
+    email:           someone\@somewhere.org
+    mpileup/alns:    bams.list
+    mpileup/fa_ref:  human_g1k_v37.fasta
+
+
+ The project descriptions are small text files which define the input data:
+ 
+   # The pipeline config, known also as the "chain file". Note that in order to
+   # avoid the execution of an arbitrary code passed by a malicious user, the config
+   # must be a file name with any leading directory components removed. The file
+   # must exist in the dropbox config directory:
+   config: chain.pipeline.conf
+ 
+   # The rest is optional and pipeline-specific. There are a few pipeline-wide 
+   # options that are recognised by all pipelines, such as where to send email 
+   # notifications about job completion and failures:
+   email: someone\@somewhere.org
+ 
+   # Frequency (in seconds) with which to remind about failed jobs, so that
+   # the mailbox does not end up cluttered by emails. If not given, the default
+   # of 3600 seconds is used:
+   err_period: 3600
+ 
+   # Any key in a runner's config file can be overriden. For example, if a pipeline
+   # chain includes a runner step named "step_name" which recognises the config 
+   # key "var_name", the default key can be overriden as:
+   step_name/var_name: new value
+ 
+   # Similarly, substrings in a runner's config file can be expanded. For example,
+   # if the config contains the following key-value pair
+   #   key => 'some \$(value)',
+   # the variable "\$(value)" can be replaced with "new value":
+   step_name/value: new value
+ 
+   # Note: if the project description does not specify the "step_name/value" key,
+   # the variable "\$(value)" will be replaced with "value".
+ 
+   # In order to preserve compactness of project descriptions yet allowing flexibility,
+   # the runner's config files can use default values. For example, if the config
+   # contains the following key-value pair
+   #   key => 'some \$(value:sensible default)',
+   # the project description file can override the value but in case it does not,
+   # the key will be expanded as follows
+   #   key => 'some sensible default',
+   #
+   # See the misc/*conf files for real-life examples.
+ 
+ 
+ The pipeline chain can be run from the command line:
+ 
+   run-runners -v -d prefix            # one iteration
+   run-runners -v -d prefix -l 300     # loop with sleep cycles of 300 seconds
+ 
+ or from cron:
+ 
+   */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -d prefix -L config.lock'    
+ 
+ The vr-wrapper scripts can be used to set environment variables without having
+ to change user's profile. It may look as this:
+ 
+   #!/bin/bash
+   export PATH="\$HOME/git/vr-runner/scripts:\$PATH"
+   export PERL5LIB="\$HOME/git/vr-runner/modules:\$PERL5LIB"
+   
+EOT
+}
+
 
 sub create_lock
 {
@@ -158,13 +235,16 @@ sub list_projects
     my ($opts) = @_;
     my @projects = ();
 
-    # First check projects in progress
+    # First check projects in progress. Each project had been assigned a unique
+    # name: <numeric timestamp>_<user name>
+    #
     my ($dh,$project);
-    opendir($dh, $$opts{work_dir}) or error("$$opts{work_dir}: $!");
+    opendir($dh, $$opts{dropbox_tmp}) or error("$$opts{dropbox_tmp}: $!");
     while (my $dir = readdir($dh))
     {
-        if ( !-d "$$opts{work_dir}/$dir" or !($dir=~/^\d+_(.*)$/ ) ) { next; }
-        $project = parse_project($opts,"$$opts{work_dir}/$dir/$1");
+        if ( !-d "$$opts{dropbox_tmp}/$dir" or !($dir=~/^\d+_(.*)$/ ) ) { next; }
+        $project = parse_project($opts,"$$opts{dropbox_tmp}/$dir/$1");
+        if ( !defined $project ) { next; }
         push @projects, $project;
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
@@ -172,20 +252,24 @@ sub list_projects
     if ( scalar @projects >= $$opts{nmax_projects} ) { return \@projects; }
 
 
-    # No unfinished projects, check for new
-    opendir($dh, $$opts{input_dir}) or error("$$opts{input_dir}: $!");
+    # No unfinished projects, check for new projects. File names starting
+    # with a dot, ending with ~, or .err are ignored. Everything else is
+    # parsed as an input.
+    #
+    opendir($dh, $$opts{dropbox_in}) or error("$$opts{dropbox_in}: $!");
     while (my $file = readdir($dh))
     {
         if ( $file =~/^\./ ) { next; }
         if ( $file =~/~$/ ) { next; }
         if ( $file =~/\.err$/ ) { next; }
-        $project = parse_project($opts,"$$opts{input_dir}/$file");
+        $project = parse_project($opts,"$$opts{dropbox_in}/$file");
+        if ( !defined $project ) { next; }
         $$project{alias} = time() .'_'. $$project{name};
         $$project{file}  = $file;
 
-        system("mkdir -p $$opts{work_dir}/$$project{alias}");
-        system("mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}");
-        if ( $? ) { confess "mv $$opts{input_dir}/$$project{file} $$opts{work_dir}/$$project{alias}/$$project{file}"; }
+        system("mkdir -p $$opts{dropbox_tmp}/$$project{alias}");
+        system("mv $$opts{dropbox_in}/$$project{file} $$opts{dropbox_tmp}/$$project{alias}/$$project{file}");
+        if ( $? ) { confess "mv $$opts{dropbox_in}/$$project{file} $$opts{dropbox_tmp}/$$project{alias}/$$project{file}"; }
 
         push @projects, $project;
         if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
@@ -200,20 +284,30 @@ sub clean_project
 
     my $name = $$project{name};
     debug_msg($opts,"Cleaning project: $name\n");
-    $$project{prefix} = "$$opts{work_dir}/$$project{alias}/$name";
+    $$project{prefix} = "$$opts{dropbox_tmp}/$$project{alias}/$name";
 
-    for my $outdir (keys %{$$opts{outputs}})
+    for my $outdir (keys %{$$project{outputs}})
     {
-        system("mkdir -p $$opts{output_dir}/$$project{alias}/$outdir");
-        for my $file (@{$$opts{outputs}{$outdir}})
+        if ( ref($$project{outputs}{$outdir}) eq 'ARRAY' )
         {
-            my $path = expand_vars($opts,$project,$file);
-            system("mv $path $$opts{output_dir}/$$project{alias}/$outdir/");
+            # create a subdirectory '$outdir' and copy all listed files in there
+            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}/$outdir");
+            for my $file (@{$$project{outputs}{$outdir}})
+            {
+                my $path = expand_vars($opts,$project,$file);
+                cmd($opts,"mv $path $$opts{dropbox_out}/$$project{alias}/$outdir/");
+            }
+        }
+        else
+        {
+            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}");
+            my $path = expand_vars($opts,$project,$outdir);
+            cmd($opts,"mv $path $$opts{dropbox_out}/$$project{alias}/");
         }
     }
 
-    system("mkdir -p $$opts{output_dir}/$$project{alias}/tmp-data");
-    system("mv $$opts{work_dir}/$$project{alias} $$opts{output_dir}/$$project{alias}/tmp-data");
+    cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}/tmp-data");
+    cmd($opts,"mv $$opts{dropbox_tmp}/$$project{alias} $$opts{dropbox_out}/$$project{alias}/tmp-data");
 }
 
 # Parse the project definition
@@ -224,47 +318,138 @@ sub parse_project
     my $dir  = $1;
     my $name = $2;
     my %project = ();
+    my @override = ();
     open(my $fh,'<',$file) or error("$file: $!");
     while (my $line=<$fh>)
     {
-        if ( $line=~/^#/ ) { next; }
+        if ( $line=~/^\s*#/ ) { next; }
         if ( $line=~/^\s*$/ ) { next; }
         $line =~ s/^\s*//;
         $line =~ s/\s*$//;
-        if ( !($line=~/^\s*([^:]+)\s*:/) ) { error("Could not parse $file: $line\n"); }
+        if ( !($line=~/^\s*([^:]+)\s*:/) ) 
+        { 
+            print STDERR "Could not parse $file: $line\n";
+            if ( $$opts{ignore_failures} ) { return undef; }
+            error("Failed: $file\n");
+        }
         my $key = $1;
         my $value = $';
         $value =~ s/^\s*//;
         $value =~ s/\s*$//;
+        $value = parse_config_value($value);    # expand deep variables (arrays or hashes)
         $key   =~ s/\s*$//;
+        if ( $key =~ m{/} )
+        {
+            push @override, [$key,$value];      # user variable can override a default config key
+            next;
+        }
         $project{$key} = $value;
     }
     close($fh) or error("close failed: $file");
     $project{dir}  = $dir;
     $project{name} = $name;
     if ( $dir=~m{^.+/(\d+_[^/]+)$} ) { $project{alias} = $1; }
+
+    # Parse project's config file
+    if ( !exists($project{config}) )
+    {
+        print STDERR "Config not present in $file\n";
+        if ( $$opts{ignore_failures} ) { return undef; }
+        error("Failed: $file\n");
+    }
+    if ( $project{config} =~ m{/} )
+    {
+        print STDERR "The config must be a plain file in $$opts{dropbox_conf},\n";
+        print STDERR "please remove the directory part from $project{config}.\n";
+        if ( $$opts{ignore_failures} ) { return undef; }
+        error("Failed: $file\n");
+     }
+    my $config_fname = "$$opts{dropbox_conf}/$project{config}";
+    my $ret = open($fh,'<',$config_fname);
+    if ( !$ret ) 
+    {
+        print STDERR "No such config in $$opts{dropbox_conf}:\n\t$config_fname\n";
+        if ( $$opts{ignore_failures} ) { return undef; }
+        error("Failed: $file\n");
+    }
+    my @config_lines = <$fh>;
+    close($fh) or error("close failed: $config_fname");
+    my $config_str = join('',@config_lines);
+    my $x = eval "{ $config_str }";
+    if ( $@ ) { error("eval $config_fname: $@\n"); }
+
+    $x = parse_config($opts,$config_fname,\@override,$x);
+    %project = (%project, %$x);
+    if ( !@{$project{steps}} ) { error("No steps defined in the pipeline: $config_fname\n\n"); }
+
     return \%project;
+}
+
+sub parse_config_value
+{
+    my ($value) = @_;
+    if ( $value=~/^\[/ && $value=~/\]$/ or $value=~/^\{/ && $value=~/\}$/ )
+    {
+        my $val = eval "$value";
+        if ( !$@ ) { $value = $val; }
+    }
+    return $value;
+}
+
+sub parse_config
+{
+    my ($opts,$fname,$override,$config) = @_;
+    for my $step (@{$$config{steps}})
+    {
+        if ( !exists($$config{$step}) ) { error("Step \"$step\" undefined in $fname\n"); }
+
+        for my $key (keys %{$$config{$step}})
+        {
+            if ( $key ne 'include' ) { push @$override, ["$step/$key",$$config{$step}{$key}]; next; }
+
+            my $config_fname = "$$opts{dropbox_conf}/$$config{$step}{include}";
+            open(my $fh,'<',$config_fname) or error("$config_fname: $!");
+            my @config_lines = <$fh>;
+            close($fh) or error("close failed: $config_fname");
+            my $config_str = join('',@config_lines);
+            my $x = eval "{ $config_str }";
+            if ( $@ ) { error("eval $config_fname: $@\n"); }
+            $$config{$step} = {(%{$$config{$step}},%$x)};
+        }
+    }
+    for my $var (@$override)
+    {
+        my ($step,$key) = split(m{/},$$var[0]);
+        my $value = $$var[1];
+        if ( exists($$config{$step}{config}) )
+        {
+            # The step has a config (i.e. a runner). In this case we create
+            # a new config key but also expand all \$($key) occurances.
+            $$config{$step}{config}{$key} = $value;
+        }
+        # All \$($key) occurances will be expanded
+        $$config{$step}{$key} = $value;
+    }
+
+    # Convert config to text
+    for my $step (@{$$config{steps}})
+    {
+        if ( exists($$config{$step}{config}) )
+        {
+            use Data::Dumper;
+            my @config_lines = split(/\n/,Dumper($$config{$step}{config}));
+            shift(@config_lines);       # get rid of $VAR1 = { .. } lines
+            pop(@config_lines);
+            $$config{$step}{config} = join("\n",@config_lines);
+        }
+    }
+    return $config;
 }
 
 # Replace variables $(var_name)
 sub expand_vars
 {
     my ($opts,$project,$str) = @_;
-    pos($str) = 0;
-    while ( ($str =~ /\G(.*?)\$\(([^\)]+)\)/s) )
-    {
-        pos($str) += length($&);
-        if ( exists($$project{$2}) ) 
-        { 
-            $str = $` . $1 . $$project{$2} . $'; 
-            next; 
-        }
-        elsif ( exists($$opts{$2}) )
-        { 
-            $str = $` . $1 . $$opts{$2} . $'; 
-            next; 
-        }
-    }
     pos($str) = 0;
     while ( ($str =~ /\G(.*?)\$\(([^\)]+):([^\)]+)\)/s) )
     {
@@ -274,14 +459,24 @@ sub expand_vars
             $str = $` . $1 . $$project{$2} . $'; 
             next; 
         }
-        elsif ( exists($$opts{$2}) )
+        else
+        {
+            $str = $` . $1 . $3 . $';       # replace "$(string:200)" with "200" if key "string" is not present
+        }
+    }
+    pos($str) = 0;
+    while ( ($str =~ /\G(.*?)\$\(([^\)]+)\)/s) )
+    {
+        pos($str) += length($&);
+        if ( exists($$project{$2}) ) 
         { 
-            $str = $` . $1 . $$opts{$2} . $'; 
+            $str = $` . $1 . $$project{$2} . $'; 
             next; 
         }
         else
         {
-            $str = $` . $1 . $3 . $';
+            $str = $` . $1 . $2 . $';       # replace "$(string)" with "string" if key "string" is not present
+            next;
         }
     }
     return $str;
@@ -302,115 +497,133 @@ sub debug_msg
     print STDERR join('',@msg);
 }
 
-# Create config file for each task (if the key "config" exists for the task)
-# and run all runners until finished.
+# Create a config file for each step in project (if the key "config" exists for
+# the step) and run all runners until finished.
 sub run_project
 {
     my ($opts,$project) = @_;
     my $name = $$project{name};
     debug_msg($opts,"Checking status: $name\n");
-    for my $task (@{$$opts{tasks}})
+    for my $step (@{$$project{steps}})
     {
-        my $prefix = "$$opts{work_dir}/$$project{alias}/$name";
-        debug_msg($opts, "Checking task: $prefix.$task.done\n");
-        if ( -e "$prefix.$task.done" ) 
+        my $prefix = "$$opts{dropbox_tmp}/$$project{alias}/$name";
+        debug_msg($opts, "Checking step: $prefix.$step.done\n");
+        if ( -e "$prefix.$step.done" ) 
         { 
-            debug_msg($opts, "Task done: $prefix\n");
+            debug_msg($opts, "step done: $prefix.$step\n");
             next; 
         }
-        if ( ! -e "$prefix.$task" ) { system("mkdir -p $prefix.$task"); }
+        if ( ! -e $prefix ) { system("mkdir -p $prefix.$step"); }
         $$project{prefix} = $prefix;
+        $$project{step}   = $step;
 
-        if ( exists($$opts{$task}{config}) && (!-e "$prefix.$task.conf" or first_file_newer($$opts{config},"$prefix.$task.conf")) )
+        if ( exists($$project{$step}{config}) && !-e "$prefix.$step.conf" )
         {
-            my $config = expand_vars($opts,$project,$$opts{$task}{config});
-            open(my $fh,'>',"$prefix.$task.conf.part") or error("$prefix.$task.conf.part: $!");
+            my $config = expand_vars($opts,$$project{$step},$$project{$step}{config});
+            open(my $fh,'>',"$prefix.$step.conf.part") or error("$prefix.$step.conf.part: $!");
             print $fh $config;
-            close($fh) or error("close failed: $prefix.$task.conf.part");
-            rename("$prefix.$task.conf.part","$prefix.$task.conf") or error("rename $prefix.$task.conf.part $prefix.$task.conf: $!");
+            close($fh) or error("close failed: $prefix.$step.conf.part");
+            rename("$prefix.$step.conf.part","$prefix.$step.conf") or error("rename $prefix.$step.conf.part $prefix.$step.conf: $!");
         }
 
         my $cwd;
-        if ( $$opts{chdir_into_project} )
+        if ( $$project{chdir_into_project} )
         {
+            print STDERR "chdir $$opts{dropbox_tmp}/$$project{alias}\n";
             $cwd = getcwd;
-            chdir("$$opts{work_dir}/$$project{alias}");
-            print STDERR "chdir $$opts{work_dir}/$$project{alias}\n";
+            chdir("$$opts{dropbox_tmp}/$$project{alias}");
             $$project{prefix} = $name;
         }
-        my $ret = run_task($opts,$project,$task);
+        my $ret = run_step($opts,$project,$step);
         if ( defined $cwd ) { chdir($cwd); }
         if ( !$ret ) { return; }
 
-        system("touch $prefix.$task.done");
-        if ( $? ) { confess "touch $prefix.$task.done"; }
+        system("touch $prefix.$step.done");
+        if ( $? ) { confess "touch $prefix.$step.done"; }
     }
     clean_project($opts,$project);
-    send_email($project,"The project \"$name\" finished","The project \"$name\" finished");
+    send_email($project,"The project \"$name\" finished","The project \"$name\" finished:\n\t$$opts{dropbox_out}/$$project{alias}");
 }
 
-
-# Run a single runner
-sub run_task
+sub cmd
 {
-    my ($opts,$project,$task_name) = @_;
-    my $task = $$opts{$task_name};
-    for my $job (@{$$task{run}})
-    {
-        my $cmd = expand_vars($opts,$project,$$job{cmd});
-        debug_msg($opts, "Running task: $cmd\n");
+    my ($opts,$cmd) = @_;
 
-        if ( !exists($$job{status}) ) { $$job{status}{done} = 0; }
+    my $tmp = $$opts{lock} ? $$opts{lock} : "/tmp/runners.$$";
+    open(my $stderr,'>',"$tmp.e") or confess("$tmp.e: $!");
+    open(my $stdout,'>',"$tmp.o") or confess("$tmp.o: $!");
+
+    my @cmd = ('/bin/bash', '-o','pipefail','-c', $cmd);
+    run3 \@cmd,undef,$stdout,$stderr;
+
+    close($stderr);
+    close($stdout);
+
+    my $signal  = $? & 127;
+    my $status  = $? >> 8;
+
+    my (@out,@err);
+    if ( open(my $fh,'<',"$tmp.o") )
+    {
+        @out = <$fh>;
+        close($fh);
+    }
+    if ( open(my $fh,'<',"$tmp.e") )
+    {
+        @err = <$fh>;
+        close($fh);
+    }
+    unlink("$tmp.o");
+    unlink("$tmp.e");
+
+    return ($signal,$status,\@out,\@err);
+}
+
+# Run a single runner. There can be multiple steps per pipeline (project).
+sub run_step
+{
+    my ($opts,$project,$step_name) = @_;
+    my $step = $$project{$step_name};
+    $$step{prefix} = $$project{prefix};
+    $$step{step}   = $step_name;
+    for my $job (@{$$step{run}})
+    {
+        my $cmd = expand_vars($opts,$step,$$job{cmd});
+
+        if ( !exists($$job{status}) or !exists($$job{status}{done}) ) { $$job{status}{done} = [0]; }
+        my %done = map { $_=>1 } @{$$job{status}{done}};
+        my %loop = exists($$job{status}{loop}) ? map { $_=>1 } @{$$job{status}{loop}} : ();
 
         while ( 1 )
         {
-            print STDERR "$cmd\n";
-            system($cmd);
-
-            my $status = $? >> 8;
-
-            if ( exists($$job{status}{error}) && $status==$$job{status}{error} )
-            {
-                send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
-                if ( $$opts{ignore_failures} )
-                {
-                    print STDERR "Failed: $cmd\n\n";
-                    return 0;   # Act as if the task was not finished
-                }
-                error("Failed: $cmd"); 
-            }
-
-            if ( $status==$$job{status}{done} ) { last; }
-
-            if ( !exists($$job{loop}) )
-            { 
-                if ( !exists($$job{status}{error}) )
-                { 
-                    send_err_email($project,"$task_name failed","Project $$project{name} failed: $cmd");
-                    if ( $$opts{ignore_failures} )
-                    {
-                        print STDERR "Failed: $cmd\n\n";
-                        return 0;   # Act as if the task was not finished
-                    }
-                    error("Failed: $cmd"); 
-                }
-                last;
-            }
-
-            if ( $status==$$job{status}{loop} )
+            debug_msg($opts, "Running step $step_name: $cmd\n");
+            my ($signal,$status,$out,$err) = cmd($opts,$cmd);
+            if ( !$signal && $done{$status} ) { last; }
+            if ( !$signal && $loop{$status} )
             {
                 if ( !$$opts{loop} ) { return 0; }
-                sleep($$job{loop}); 
+                print STDERR "sleeping $$opts{loop} seconds..\n" unless !$$opts{verbose};
+                sleep($$opts{loop}); 
             }
             else 
             { 
-                send_err_email($project,"$task_name error","Unexpected return status: status ($?): $cmd\nProject $$project{name}\n");
+                my $out = @$out ? join('',@$out) : '<none>';
+                my $err = @$err ? join('',@$err) : '<none>';
+                my $msg = 
+                        "\n---\nError: unexpected signal/status ($signal/$status) from the command:\n" .
+                        "\t$cmd\n\n".
+                        "Working directory:\n\t$$opts{dropbox_tmp}/$$project{alias}/\n\n".
+                        "Standard output:\n$out\n\n".
+                        "Error output:\n$err\n---\n\n";
+
+                send_err_email($project,"$step_name error",$msg);
+
                 if ( $$opts{ignore_failures} )
                 {
                     print STDERR "Failed: $cmd\n\n";
-                    return 0;   # Act as if the task was not finished
+                    return 0;   # Act as if the step has not finished
                 }
-                error("Unexpected return status: $status ($?) .. $cmd"); 
+                error($msg); 
             }
         }
     }
