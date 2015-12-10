@@ -108,7 +108,7 @@ sub new
         "   +help                   Summary of commands\n" .
         "   +config <file>          Configuration file\n" .
         "   +debug <file1> <file2>  Run the freezed object <file1> overriding with keys from <file2>\n" .
-        "   +js <platform>          Job scheduler (lowercase allowed): LSF (bswitch), LSFCR (BLCR) [LSF]\n" .
+        "   +js <platform>          Job scheduler (lowercase allowed): LSF (bswitch), LSFCR (BLCR), MPM, SLURM [LSF]\n" .
         "   +kill                   Kill all running jobs\n" .
         "   +local                  Do not submit jobs to LSF, but run serially\n" .
         "   +lock <file>            Exit if another instance is already running\n" .
@@ -116,6 +116,7 @@ sub new
         "   +mail <address>         Email when the runner finishes\n" .
         "   +maxjobs <int>          Maximum number of simultaneously running jobs\n" .
         "   +nocache                When checking for finished files, do not rely on cached database and check again\n" .
+        "   +reset <step>           Reset status of a failed step\n" .
         "   +retries <int>          Maximum number of retries. When negative, the runner eventually skips the task rather than exiting completely. [$$self{_nretries}]\n" .
         "   +run <file> <id>        Run the freezed object created by spawn\n" .
         "   +sampleconf             Print a working configuration example\n" .
@@ -136,7 +137,12 @@ sub new
                 +help
                     Summary of commands
                 +js <platform>
-                    Job scheduler: LSF (bswitch to deal with overrun), LSFCR (BLCR)
+                    Job scheduler, for convenience can be given in lower case:
+                        LSF    .. with bswitch to deal with overrun
+                        LSF-CR .. BLCR
+                        LSFCR  .. alias for LSR-CR
+                        MPM    .. a single multiprocessor machine
+                        SLURM  .. SLURM workload manager
                 +kill
                     Kill all running jobs
                 +local
@@ -154,6 +160,8 @@ sub new
                     Maximum number of simultaneously running jobs
                 +nocache
                     When checking for finished files, do not rely on cached data and check again
+                +reset <step>
+                    Reset the status of a failed step
                 +retries <int>
                     Maximum number of retries
                 +run <file>
@@ -185,19 +193,27 @@ sub run
         if ( $arg eq '+loop' ) { $$self{_loop}=shift(@ARGV); next; }
         if ( $arg eq '+lock' ) { $$self{_lock}=shift(@ARGV); next; }
         if ( $arg eq '+kill' ) { $$self{_kill_jobs}=1; next; }
-        if ( $arg eq '+maxjobs' ) { $$self{_maxjobs}=shift(@ARGV); next; }
+        if ( $arg eq '+maxjobs' ) 
+        { 
+            $$self{_maxjobs}=shift(@ARGV); 
+            if ( !($$self{_maxjobs}=~/^\d+$/) ) { $self->throw("Expected integer value with +maxjobs, got \"$$self{_maxjobs}\"\n"); }
+            if ( $$self{_maxjobs}<=0 ) { $self->throw("The argument to +maxjobs must be bigger than 0, got \"$$self{_maxjobs}\"\n") }
+            next; 
+        }
         if ( $arg eq '+mail' ) { $$self{_mail}=shift(@ARGV); next; }
         if ( $arg eq '+nocache' ) { $$self{_nocache}=1; next; }
+        if ( $arg eq '+reset' ) { $$self{_reset_step}=shift(@ARGV); next; }
         if ( $arg eq '+retries' ) { $$self{_nretries}=shift(@ARGV); next; }
         if ( $arg eq '+verbose' ) { $$self{_verbose}=1; next; }
         if ( $arg eq '+silent' ) { $$self{_verbose}=0; next; }
         if ( $arg eq '+js' ) 
         { 
             $$self{_farm}=shift(@ARGV); 
-            if ( $$self{_farm} eq 'lsf' ) { $$self{_farm} = 'LSF'; }
-            elsif ( $$self{_farm} eq 'lsf-cr' ) { $$self{_farm} = 'LSFCR'; }
-            elsif ( $$self{_farm} eq 'lsfcr' ) { $$self{_farm} = 'LSFCR'; }
-            elsif ( $$self{_farm} eq 'LSF-CR' ) { $$self{_farm} = 'LSFCR'; }
+            if ( lc($$self{_farm}) eq 'lsf' ) { $$self{_farm} = 'LSF'; }
+            elsif ( lc($$self{_farm}) eq 'lsf-cr' ) { $$self{_farm} = 'LSFCR'; }
+            elsif ( lc($$self{_farm}) eq 'lsfcr' ) { $$self{_farm} = 'LSFCR'; }
+            elsif ( lc($$self{_farm}) eq 'mpm' ) { $$self{_farm} = 'MPM'; }
+            elsif ( lc($$self{_farm}) eq 'slurm' ) { $$self{_farm} = 'SLURM'; }
             next; 
         }
         if ( $arg eq '+local' ) { $$self{_run_locally}=1; next; }
@@ -233,6 +249,14 @@ sub run
     @ARGV = @argv;
 
     $self->create_lock();
+
+    if ( $$self{_reset_step} )
+    {
+        $self->_init_scheduler;
+        $$self{_js}->reset_step($$self{_reset_step});
+        $self->remove_lock();
+        return;
+    }
 
     # Run the user's module once or multiple times
     while (1)
@@ -365,6 +389,8 @@ sub _sample_config
     Usage : $self->set_limits(memory=>1_000, runtime=>24*60);
     Args  : <cpus>
                 Number of processors to use
+            <max_jobs>
+                The maximum number of jobs that can be submitted at once
             <memory>
                 Expected memory requirements [MB] or undef to unset
             <runtime>
@@ -710,6 +736,21 @@ sub _get_unfinished_jobs
     return \%wfiles;
 }
 
+sub _init_scheduler
+{
+    my ($self) = @_;
+    if ( !$$self{_run_locally} && !$$self{_js} )
+    {
+        my $farm = 'Runner' . $$self{_farm};
+        eval 
+        {
+            require "$farm.pm";
+            $$self{_js} = $farm->new();
+        };
+        if ( $@ ) { $self->throw("require $farm\n$@"); }
+        if ( $$self{_maxjobs} ) { $$self{_js}->set_limits(max_jobs=>$$self{_maxjobs}); }
+    }
+}
 
 =head2 wait
 
@@ -729,18 +770,8 @@ sub wait
     my ($self,@files) = @_;
 
     # Initialize job scheduler (LSF, LSFCR, ...). This needs to be done here in
-    # order for $js->clean_job() to work when $self->_get_unfinished_jobs() is called
-    if ( !$$self{_run_locally} && !$$self{_js} )
-    {
-        my $farm = 'Runner' . $$self{_farm};
-        eval 
-        {
-            require "$farm.pm";
-            $$self{_js} = $farm->new();
-        };
-        if ( $@ ) { $self->throw("require $farm\n$@"); }
-        if ( $$self{_maxjobs} ) { $$self{_js}->set_max_jobs($$self{_maxjobs}); }
-    }
+    # order for $js->clean_jobs() to work when $self->_get_unfinished_jobs() is called
+    $self->_init_scheduler;
 
     # First check the files passed to wait() explicitly
     for my $file (@files)
@@ -800,13 +831,13 @@ sub wait
     # Each wfile corresponds to a single task group, each typically having multiple parallel jobs
     for my $wfile (keys %$jobs)     
     {
+        # unique id for this step and output directory
         my $prefix = $self->_get_temp_prefix($wfile);
-        my $jobs_id_file = $prefix . '.jid';
 
         my @ids = sort { $a<=>$b } keys %{$$jobs{$wfile}};
         $self->debugln("\t.. ", scalar keys %$jobs > 1 ? scalar @ids."x\t$wfile" : "$wfile");
 
-        my $tasks = $js->get_jobs($jobs_id_file,\@ids);
+        my $tasks = $js->init_jobs($prefix,\@ids);
         my $is_wfile_running = 0;
         my $warned = 0;
         for (my $i=0; $i<@$tasks; $i++)
@@ -840,7 +871,7 @@ sub wait
                 else { $must_run = 0; }
             }
 
-            # If the job has been already ran and failed, check if it failed repeatedly
+            # If the job has been already run and failed, check if it failed repeatedly
             elsif ( $js->job_failed($task) ) 
             { 
                 my $nfailures = $js->job_nfailures($task);
@@ -858,7 +889,10 @@ sub wait
                     {
                         my $msg = 
                             "The job failed repeatedly, ${nfailures}x: $wfile.$ids[$i].[eo]\n" .
-                            "(Remove $jobs_id_file to clean the status, increase +retries or run with negative value of +retries to skip this task.)\n";
+                            "What next?\n" .
+                            " - Retry the step by running with +retries $nfailures\n" .
+                            " - Reset the status by running with +reset $prefix\n" .
+                            " - Skip the failing job by running with negative value of +retries\n\n";
 
                         $self->_send_email('failed', "The runner failed repeatedly\n", $$self{_about}, "\n", $msg);
                         $self->throw($msg);
@@ -893,7 +927,7 @@ sub wait
         if ( $$self{_kill_jobs} ) { next; }
         if ( !@ids ) 
         { 
-            if ( !$is_wfile_running ) { unlink($jobs_id_file); }
+            if ( !$is_wfile_running ) { $js->reset_step($prefix); }
             next; 
         }
         if ( $$self{_maxjobs} )
@@ -917,7 +951,7 @@ sub wait
         eval 
         {
             $js->set_limits(%{$$self{_farm_options}});
-            $js->run_jobs($jobs_id_file,$prefix,$cmd,\@ids);
+            $js->run_jobs($prefix,$cmd,\@ids);
             $ok = 1;
         };
         if ( !$ok )
@@ -1073,8 +1107,8 @@ sub _revive
 
     # If we are here, the code finished successfully - remove the jids file to wipe out history
     my $prefix = $self->_get_temp_prefix($$self{_store}{done_file});
-    my $farm_jobs_ids = $prefix.'.jid';
-    unlink($farm_jobs_ids);
+    $self->init_scheduler;
+    $$self{_js}->reset_step($prefix);
 }
 
 # Create a temporary prefix using the given template and create a temporary directory

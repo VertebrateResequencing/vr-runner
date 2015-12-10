@@ -60,11 +60,6 @@ sub job_nfailures
     my ($self, $task) = @_;
     return $$task{nfailures} ? $$task{nfailures} : 0;
 }
-sub set_max_jobs
-{
-    my ($self,$nmax) = @_;
-    $$self{nmax_jobs} = $nmax;
-}
 # runtime and queue_limits are in minutes
 sub set_limits
 {
@@ -111,9 +106,10 @@ sub _init_zombies
     }
 }
 
-sub get_jobs
+sub init_jobs
 {
-    my ($self, $jids_file, $ids) = @_;
+    my ($self, $job_name, $ids) = @_;
+    my $jids_file = "$job_name.jid";
 
     # For each input job id create a hash with info: status, number of failuers
     my @jobs_out = ();
@@ -212,7 +208,7 @@ sub get_jobs
     for (my $i=0; $i<@$ids; $i++)
     {
         if ( $jobs_out[$i]{status} & $$self{Running} || $jobs_out[$i]{status} & $$self{Error} ) { $ntodo++; }
-        if ( $$self{nmax_jobs} && $ntodo >= $$self{nmax_jobs} ) { last; } 
+        if ( $$self{limits}{max_jobs} && $ntodo >= $$self{limits}{max_jobs} ) { last; } 
         if ( $jobs_out[$i]{status} ne $$self{No} ) { next; }
         my $info = $self->_parse_output($$ids[$i], $path);
         if ( defined $info )
@@ -575,7 +571,8 @@ sub _bsub_command
 
 sub run_jobs
 {
-    my ($self,$jids_file,$job_name,$cmd,$ids) = @_;
+    my ($self,$job_name,$cmd,$ids) = @_;
+    my $jids_file = "$job_name.jid";
 
     if ( !scalar @$ids ) { confess("No IDs given??\n"); }
 
@@ -593,6 +590,13 @@ sub run_jobs
         # Submit to LSF
         $self->_bsub_command($jids_file,$job_name,$bsub_cmd,$cmd);
     }
+}
+
+sub reset_step
+{
+    my ($self,$job_name) = @_;
+    my $jids_file = "$job_name.jid";
+    unlink($jids_file);
 }
 
 =head1 AUTHORS

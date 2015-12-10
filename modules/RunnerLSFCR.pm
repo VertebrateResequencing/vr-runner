@@ -209,7 +209,8 @@ sub _checkpoint_ready
 
 sub run_jobs
 {
-    my ($self,$jids_file,$job_name,$cmd,$ids) = @_;
+    my ($self,$job_name,$cmd,$ids) = @_;
+    my $jids_file = "$job_name.jid";
     if ( !scalar @$ids ) { confess("No IDs given??\n"); }
 
     my $cwd = getcwd();
