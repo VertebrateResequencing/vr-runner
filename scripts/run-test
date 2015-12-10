@@ -1,0 +1,67 @@
+#!/usr/bin/env perl
+#
+#   Author: petr.danecek@sanger
+#
+#   About: This is a super-simple example of the Runner framework.
+#       It creates three files in the home directory named Hello.1,
+#       Hello.2 and Hello3. The files are created in parallel.
+#
+#   Usage:
+#       ./run-test +loop 30
+#
+use strict;
+use warnings;
+
+# Create new runner object and run it
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+# The user must define at least this method
+sub main
+{
+    my ($self) = @_;
+
+    # Create three files in the home directory called Hello.1, Hello.2, Hello.3
+    # The files will be created in parallel.
+    for my $file (qw(1 2 3))
+    {
+        my $method    = "touch";
+        my $done_file = "$ENV{HOME}/Hello.$file";
+        my @params    = ();
+        $self->spawn($method,$done_file,@params);       # This schedules the jobs
+    }
+    $self->wait;    # This executes them in parallel and waits for the results
+
+    # Once finished, the program can continue
+
+    print STDERR "Mission accomplished!\n";
+    $self->all_done;
+}
+
+sub touch
+{
+    my ($self,$file) = @_;
+
+    # Pretend there is some computation lasting 10 seconds
+    sleep(10);
+
+    # Then create an empty output file
+    `touch $file`;
+}
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+    return $self;
+}
+

@@ -1,0 +1,148 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            # Select files in the input directory on which the commands below 
+            # will be executed. The files will be processed in parallel.
+            glob => [qw(*.vcf.gz *.bcf)],
+
+            # Config variables can be referenced using curly brackets ({variable}).
+            # cmds => 
+            # [
+            #     '{bcftools} annotate ... {in} -Ob -o {tmpdir}/1.bcf',
+            #     '{bcftools} index {tmpdir}/1.bcf',
+            #     '... {tmpdir}/1.bcf {tmpdir}/2.bcf',
+            #     '... {tmpdir}/2.bcf {out}',
+            # ],
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Small pipeline to parallelize series of commands\n" .
+        "Usage: run-commands\n" .
+        "Options:\n" .
+        "   -i, --indir <dir>       Input directory\n" .
+        "   -o, --outdir <dir>      Output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-i' or $arg eq '--indir' ) { $$self{indir}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !exists($$self{indir}) ) { $self->throw("Expected the -i option."); }
+    if ( !exists($$self{cmds}) ) { $self->throw("Expected the 'cmds' config key."); }
+    if ( !exists($$self{glob}) ) { $self->throw("Expected the 'glob' config key."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    my @files = $self->list_files($$self{glob});
+    `mkdir -p $$self{outdir}`;
+
+    for my $file (@files)
+    {
+        $self->spawn('run_command',"$$self{outdir}/$file.done",$file);
+    }
+    $self->wait;
+
+    $self->all_done;
+}
+
+sub list_files
+{
+    my ($self,$glob) = @_;
+    my @files = ();
+    if ( !-d $$self{indir} && -e $$self{indir} )
+    {
+        my $file = $$self{indir};
+        if ( $file=~m{([^/]+)$} ) { $$self{indir} = $`; $file = $1; }
+        return ($file); 
+    }
+    for my $expr (@$glob)
+    {
+        if ( $expr=~m{/} ) { $self->throw("Directories not supported yet: $expr\n"); }  # because of name clashes..
+        my @tmp = glob("$$self{indir}/$expr");
+        for my $file (@tmp)
+        {
+            $file =~ s{^.*/}{};
+            push @files,$file;
+        }
+    }
+    return @files;
+}
+
+sub expand_task
+{
+    my ($self,%args) = @_;
+    my $out = '';
+    my $str = $args{cmd};
+    while ( $str=~/{([^}]+)}/ )
+    {
+        $out .= $`;
+        my $key = $1;
+        if ( $key eq 'in' ) { $key = "$$self{indir}/$args{name}"; }
+        elsif ( $key eq 'out' ) { $key = "$$self{outdir}/$args{name}"; }
+        elsif ( exists($args{$key}) ) { $key = $args{$key}; }
+        elsif ( exists($$self{$key}) ) { $key = $$self{$key}; }
+        else { $self->throw("No such key [$key] [$args{cmd}]"); }
+        $out .= $key;
+        $str = $';
+    }
+    $out .= $str;
+    return $out;
+}
+
+sub run_command
+{
+    my ($self,$outfile,$file) = @_;
+    my $tmpdir = "$$self{outdir}/tmp.$file";
+    $self->cmd("mkdir -p $tmpdir");
+    for my $cmd (@{$$self{cmds}})
+    {
+        my $task = $self->expand_task(cmd=>$cmd,name=>$file,tmpdir=>$tmpdir);
+        $self->cmd($task,verbose=>1);
+    }
+    $self->cmd("rm -rf $tmpdir");
+    $self->cmd("touch $outfile");
+}
+
+
