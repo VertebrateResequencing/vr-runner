@@ -2,8 +2,8 @@ The vr-runner package provides a lightweight pipeline framework.
 
 Runner pipelines
 ----------------
-The runner pipelines are usually named as **run-something**. This document uses
-**run-mpileup** as an example, but the usage is the same for all runners. 
+The runner pipelines are usually named as `run-something`. This document uses
+`run-mpileup` as an example, but the usage is the same for all runners. 
 
 For the impatient
 -----------------
@@ -21,16 +21,16 @@ Important: see also the section about setting environment variables below!
 
 In more detail
 --------------
-The Runner.pm pipelines have two types of options. The options prefixed by "+" are common to all runners, the options prefixed by "-" are pipeline specific. For a complete list of the options run with -h, the output of which is shown at the bottom of this page
+The Runner.pm pipelines have two types of options. The options prefixed by `+` are common to all runners, the options prefixed by `-` are pipeline specific. For a complete list of the options run with `-h`, the output of which is shown at the bottom of this page
 
     run-mpileup -h
 
-The pipelines can be run in a daemon mode (turned on by supplying the "**+loop**" option) or they can do one iteration only and stop ("**+loop**" option not given). The latter is suitable for execution from cron. Because the runner script itself consumes close to zero CPU time and memory, it can be run on farm head nodes. In this mode, it is convenient to run it from screen. For details about how to use screen see the manual pages (man screen), but generally knowing the following is enough:
+The pipelines can be run in a daemon mode (turned on by giving the `+loop` option) or they can do one iteration only and stop (`+loop` option not given). The latter is suitable for execution from cron. Because the runner script itself consumes close to zero CPU time and memory, it can be run on farm head nodes. In this mode, it is convenient to run it from screen. For details about how to use screen see the manual pages (man screen), but generally knowing the following is enough:
 
-  * Launch a new screen by executing the command **screen**
+  * Launch a new screen by executing the command `screen`
   * Type enter and run whatever commands you like. (In our case it will be the run-mpileup command.)
-  * Detach from the screen by pressing **ctrl+a** followed by **d**
-  * At any time one can reattach to a running screen by executing **screen -r**
+  * Detach from the screen by pressing `ctrl+a` followed by `d`
+  * At any time one can reattach to a running screen by executing `screen -r`
 
 If the farm has multiple head nodes, note that the screen lives on a concrete computer and therefore one has to log into the exact same machine to access it. One can simultaneously run as many screens as necessary.
 
@@ -38,44 +38,95 @@ Note that it is not necessary (nor recommended) to submit the runner scripts to 
 
 Setting environment variables
 -----------------------------
-The **vr-wrapper** script can be used to set environment variables without having
+The `vr-wrapper` script can be used to set environment variables without having
 to change user's profile. It may look like this:
 
     #!/bin/bash
     export PATH="$HOME/git/vr-runner/scripts:$PATH"
     export PERL5LIB="$HOME/git/vr-runner/modules:$PERL5LIB"
 
-Save the config in the file, say **~/.vrw/runners** and use like this:
+Save the config in the file, say `~/.vrw/runners` and use like this:
 
     vr-wrapper ~/.vrw/runners run-mpileup +config my.conf +loop 600 -o outdir
 
 
 Chaining multiple runners
 -------------------------
-Multi step pipelines can be created by chaining multiple runners and other commands via **run-runners**. The program waits for a new project to appear in an input dropbox directory, where it is picked up and automatically processesede. Once completed, the results are moved in an output dropbox directory and an email is sent to notify the user. 
+Multiple runners can be chained together using the `run-runners` pipeline manager. It runs as a daemon or from `cron` and waits for a new project to appear in a dropbox directory. After completion of the project, the results appear in output directory and the user is notified by an email. Multiple users can use the same dropbox setup to run different pipelines at the same time.
 
-The pipeline can be run in the daemon mode or from cron:
+The following directory structure is used:
 
-    # Run from the command line
-    run-runners -v -c chain.gtcheck.conf -l +300
-    
-    # Run from cron
-    */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -c config.conf -L config.lock'
+    prefix.conf .. config directory which contains pipeline definitions. 
+                    Typically this is a symbolic link to the vr-runner/misc
+                    install directory.  This is the only requirement, the rest
+                    is created automatically by the pipeline
+    prefix.in   .. dropbox input directory, drop your project here
+    prefix.out  .. output directory, the result will appear here
+    prefix.tmp  .. working directory
 
-Example config files can be found in the *misc* directory of the distribution. The projects are small text files which define the input data, they may look like this:
+Each pipeline chain consists of a series of steps defined in the `chain.*.conf` and `step.*.conf` files. For examples take a look in the `misc` directory of this distribution. Configs files in this direcotry can be used directly as they are, just symlink them as described above in the description of `prefix.conf`. If the config files are well written, the user only needs to create a small project description and place it in the dropbox input directory:
 
-    # Where to send notification about job completion
-    email: someone@somewhere.org 
-    
-    # Frequency (in seconds) with which to remind about failed jobs. This is to avoid
-    # too many emails in your mailbox
+    config:          chain.gtcheck.conf
+    email:           someone\@somewhere.org
+    mpileup/alns:    bams.list
+    mpileup/fa_ref:  human_g1k_v37.fasta
+
+The project descriptions are small text files which define the input data:
+ 
+    # The pipeline config, known also as the "chain file". Note that in order to
+    # avoid the execution of an arbitrary code passed by a malicious user, the config
+    # must be a file name with any leading directory components removed. The file
+    # must exist in the dropbox config directory:
+    config: chain.pipeline.conf
+ 
+    # The rest is optional and pipeline-specific. There are a few pipeline-wide 
+    # options that are recognised by all pipelines, such as where to send email 
+    # notifications about job completion and failures:
+    email: someone@somewhere.org
+ 
+    # Frequency (in seconds) with which to remind about failed jobs, so that
+    # the mailbox does not end up cluttered by emails. If not given, the default
+    # of 3600 seconds is used:
     err_period: 3600
-    
-    # Any value given as "$(var_name)" in the runner's config can be overriden
-    # The default value can be given as "$(var_name:default)"
-    maxjobs: 200
-
-Copy the project file in the input dropbox directory and **run-runners** will do the rest. Note that files starting with "**.**" (dot) or ending with "**~**" (tilde) will be ignored!
+ 
+    # Any key in a runner's config file can be overriden. For example, if a pipeline
+    # chain includes a runner step named "step_name" which recognises the config 
+    # key "var_name", the default key can be overriden as:
+    step_name/var_name: new value
+ 
+    # Similarly, substrings in a runner's config file can be expanded. For example,
+    # if the config contains the following key-value pair
+    #   key => 'some $(value)',
+    # the variable "$(value)" can be replaced with "new value":
+    step_name/value: new value
+  
+    # Note: if the project description does not specify the "step_name/value" key,
+    # the variable "$(value)" will be replaced with "value".
+ 
+    # In order to preserve compactness of project descriptions yet allowing flexibility,
+    # the runner's config files can use default values. For example, if the config
+    # contains the following key-value pair
+    #   key => 'some $(value:sensible default)',
+    # the project description file can override the value but in case it does not,
+    # the key will be expanded as follows
+    #   key => 'some sensible default',
+    #
+    # See the misc/*conf files for real-life examples.
+ 
+The pipeline chain can be run from the command line:
+ 
+    run-runners -v -d prefix            # one iteration
+    run-runners -v -d prefix -l 300     # loop with sleep cycles of 300 seconds
+ 
+or from cron:
+ 
+    */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -d prefix -L config.lock'    
+ 
+The vr-wrapper scripts can be used to set environment variables without having to change user's profile. It may look like this:
+ 
+    #!/bin/bash
+    export PATH="$HOME/git/vr-runner/scripts:$PATH"
+    export PERL5LIB="$HOME/git/vr-runner/modules:$PERL5LIB"
 
 
 Runner options
