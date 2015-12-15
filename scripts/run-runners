@@ -56,7 +56,7 @@ sub error
 
 sub parse_params
 {
-    my $opts = { nmax_projects=>1 };
+    my $opts = { };
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-u' || $arg eq '--usage' ) { detailed_usage(); exit; }
@@ -246,11 +246,10 @@ sub list_projects
         $project = parse_project($opts,"$$opts{dropbox_tmp}/$dir/$1");
         if ( !defined $project ) { next; }
         push @projects, $project;
-        if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
+        if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
     closedir($dh);
-    if ( scalar @projects >= $$opts{nmax_projects} ) { return \@projects; }
-
+    if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { return \@projects; }
 
     # No unfinished projects, check for new projects. File names starting
     # with a dot, ending with ~, or .err are ignored. Everything else is
@@ -272,7 +271,7 @@ sub list_projects
         if ( $? ) { confess "mv $$opts{dropbox_in}/$$project{file} $$opts{dropbox_tmp}/$$project{alias}/$$project{file}"; }
 
         push @projects, $project;
-        if ( scalar @projects >= $$opts{nmax_projects} ) { last; }
+        if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { last; }
     }
     closedir($dh);
     return \@projects;
@@ -451,7 +450,7 @@ sub expand_vars
 {
     my ($opts,$project,$str) = @_;
     pos($str) = 0;
-    while ( ($str =~ /\G(.*?)\$\(([^\)]+):([^\)]+)\)/s) )
+    while ( ($str =~ /\G(.*?)\$\(([^\)]+):([^\)]*)\)/s) )
     {
         pos($str) += length($&);
         if ( exists($$project{$2}) ) 
