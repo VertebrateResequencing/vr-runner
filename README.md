@@ -84,10 +84,10 @@ The project descriptions are small text files which define the input data:
     # notifications about job completion and failures:
     email: someone@somewhere.org
  
-    # Frequency (in seconds) with which to remind about failed jobs, so that
+    # Frequency (in minutes) with which to remind about failed jobs, so that
     # the mailbox does not end up cluttered by emails. If not given, the default
-    # of 3600 seconds is used:
-    err_period: 3600
+    # of 60 minutes is used:
+    err_period: 60
  
     # Any key in a runner's config file can be overriden. For example, if a pipeline
     # chain includes a runner step named "step_name" which recognises the config 

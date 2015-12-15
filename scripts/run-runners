@@ -39,14 +39,15 @@ sub error
         "About: Maintain a dropbox-style runner chains.\n",
         "Usage: run-runners [OPTIONS]\n",
         "Options:\n",
-        "   -d, --dropbox <prefix>  prefix to dropbox directory (read \"run-runners --usage\" first!)\n",
-        "   -i, --ignore-failures   continue with other projects even if one keeps failing\n",
-        "   -l, --loop <int>        run in daemon mode, check the status every <int> seconds\n",
-        "   -L, --lock <file>       exit if another instance is already running\n",
-        "   -n, --nmax <int>        maximum number of projects to run simultaneously\n",
-        "   -u, --usage             print detailed usage explanation\n",
-        "   -v, --verbose           increase verbosity by giving multiple times\n",
-        "   -h, -?, --help          this help message\n",
+        "   -e, --err-period <int>    wait <int> minutes before sending more emails about failing jobs\n",
+        "   -d, --dropbox <prefix>    prefix to dropbox directory (read \"run-runners --usage\" first!)\n",
+        "   -i, --ignore-failures     continue with other projects even if one keeps failing\n",
+        "   -l, --loop <int>          run in daemon mode, check the status every <int> seconds\n",
+        "   -L, --lock <file>         exit if another instance is already running\n",
+        "   -n, --nmax <int>          maximum number of projects to run simultaneously\n",
+        "   -u, --usage               print detailed usage explanation\n",
+        "   -v, --verbose             increase verbosity by giving multiple times\n",
+        "   -h, -?, --help            this help message\n",
         "Examples:\n",
         "   run-runners --usage | less          # detailed usage explanation\n",
         "   run-runners -v -d prefix -l 300     # loop with sleep cycles of 300 seconds\n",
@@ -61,6 +62,7 @@ sub parse_params
     {
         if ( $arg eq '-u' || $arg eq '--usage' ) { detailed_usage(); exit; }
         if ( $arg eq '-d' || $arg eq '--dropbox' ) { $$opts{dropbox}=shift(@ARGV); next }
+        if ( $arg eq '-e' || $arg eq '--err-period' ) { $$opts{err_period}=shift(@ARGV); next }
         if ( $arg eq '-i' || $arg eq '--ignore-failures' ) { $$opts{ignore_failures}=1; next }
         if ( $arg eq '-n' || $arg eq '--nmax' ) { $$opts{nmax_projects}=shift(@ARGV); next }
         if ( $arg eq '-L' || $arg eq '--lock' ) { $$opts{lock}=shift(@ARGV); next }
@@ -80,6 +82,7 @@ sub parse_params
     if ( !-e $$opts{dropbox_in} ) { `mkdir -p $$opts{dropbox_in}`; }
     if ( !-e $$opts{dropbox_out} ) { `mkdir -p $$opts{dropbox_out}`; }
     if ( !-e $$opts{dropbox_tmp} ) { `mkdir -p $$opts{dropbox_tmp}`; }
+    if ( !exists($$opts{err_period}) ) { $$opts{err_period} = 60; }
 
     return $opts;
 }
@@ -132,10 +135,10 @@ sub detailed_usage
    # notifications about job completion and failures:
    email: someone\@somewhere.org
  
-   # Frequency (in seconds) with which to remind about failed jobs, so that
+   # Frequency (in minutes) with which to remind about failed jobs, so that
    # the mailbox does not end up cluttered by emails. If not given, the default
-   # of 3600 seconds is used:
-   err_period: 3600
+   # of 60 minutes is used:
+   err_period: 60
  
    # Any key in a runner's config file can be overriden. For example, if a pipeline
    # chain includes a runner step named "step_name" which recognises the config 
@@ -243,7 +246,9 @@ sub list_projects
     while (my $dir = readdir($dh))
     {
         if ( !-d "$$opts{dropbox_tmp}/$dir" or !($dir=~/^\d+_(.*)$/ ) ) { next; }
-        $project = parse_project($opts,"$$opts{dropbox_tmp}/$dir/$1");
+        my $name   = $1;
+        my $run_id = $dir;
+        $project   = parse_project($opts,"$$opts{dropbox_tmp}/$dir",$name,$run_id);
         if ( !defined $project ) { next; }
         push @projects, $project;
         if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { last; }
@@ -261,14 +266,15 @@ sub list_projects
         if ( $file =~/^\./ ) { next; }
         if ( $file =~/~$/ ) { next; }
         if ( $file =~/\.err$/ ) { next; }
-        $project = parse_project($opts,"$$opts{dropbox_in}/$file");
-        if ( !defined $project ) { next; }
-        $$project{alias} = time() .'_'. $$project{name};
-        $$project{file}  = $file;
 
-        system("mkdir -p $$opts{dropbox_tmp}/$$project{alias}");
-        system("mv $$opts{dropbox_in}/$$project{file} $$opts{dropbox_tmp}/$$project{alias}/$$project{file}");
-        if ( $? ) { confess "mv $$opts{dropbox_in}/$$project{file} $$opts{dropbox_tmp}/$$project{alias}/$$project{file}"; }
+        my $name   = $file;
+        my $run_id = time() .'_'. $name;
+        $project   = parse_project($opts,$$opts{dropbox_in},$name,$run_id);
+        if ( !defined $project ) { next; }
+
+        system("mkdir -p $$opts{dropbox_tmp}/$$project{run_id}");
+        system("mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name");
+        if ( $? ) { confess "mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name"; }
 
         push @projects, $project;
         if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { last; }
@@ -283,41 +289,44 @@ sub clean_project
 
     my $name = $$project{name};
     debug_msg($opts,"Cleaning project: $name\n");
-    $$project{prefix} = "$$opts{dropbox_tmp}/$$project{alias}/$name";
+    $$project{prefix} = "$$opts{dropbox_tmp}/$$project{run_id}/$name";
 
     for my $outdir (keys %{$$project{outputs}})
     {
         if ( ref($$project{outputs}{$outdir}) eq 'ARRAY' )
         {
             # create a subdirectory '$outdir' and copy all listed files in there
-            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}/$outdir");
+            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/$outdir");
             for my $file (@{$$project{outputs}{$outdir}})
             {
                 my $path = expand_vars($opts,$project,$file);
-                cmd($opts,"mv $path $$opts{dropbox_out}/$$project{alias}/$outdir/");
+                cmd($opts,"mv $path $$opts{dropbox_out}/$$project{run_id}/$outdir/");
             }
         }
         else
         {
-            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}");
+            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}");
             my $path = expand_vars($opts,$project,$outdir);
-            cmd($opts,"mv $path $$opts{dropbox_out}/$$project{alias}/");
+            cmd($opts,"mv $path $$opts{dropbox_out}/$$project{run_id}/");
         }
     }
 
-    cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{alias}/tmp-data");
-    cmd($opts,"mv $$opts{dropbox_tmp}/$$project{alias} $$opts{dropbox_out}/$$project{alias}/tmp-data");
+    cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/tmp-data");
+    cmd($opts,"mv $$opts{dropbox_tmp}/$$project{run_id} $$opts{dropbox_out}/$$project{run_id}/tmp-data");
 }
 
 # Parse the project definition
 sub parse_project
 {
-    my ($opts,$file) = @_;
-    if ( !($file=~m{^(.+)/([^/]+)$}) ) { error("Could not parse dir/fname: $file\n"); }
-    my $dir  = $1;
-    my $name = $2;
+    my ($opts,$dir,$name,$run_id) = @_;
     my %project = ();
     my @override = ();
+
+    # the error period can be overriden by projects, set the default here
+    $project{err_period} = $$opts{err_period};
+
+    # parse the small project file
+    my $file = "$dir/$name";
     open(my $fh,'<',$file) or error("$file: $!");
     while (my $line=<$fh>)
     {
@@ -345,11 +354,11 @@ sub parse_project
         $project{$key} = $value;
     }
     close($fh) or error("close failed: $file");
-    $project{dir}  = $dir;
-    $project{name} = $name;
-    if ( $dir=~m{^.+/(\d+_[^/]+)$} ) { $project{alias} = $1; }
+    $project{name}   = $name;
+    $project{run_id} = $run_id;
+    $project{prefix} = $project{chdir_into_project} ? $name : "$$opts{dropbox_tmp}/$run_id/$name";
 
-    # Parse project's config file
+    # Read the chain file
     if ( !exists($project{config}) )
     {
         print STDERR "Config not present in $file\n";
@@ -377,7 +386,9 @@ sub parse_project
     my $x = eval "{ $config_str }";
     if ( $@ ) { error("eval $config_fname: $@\n"); }
 
-    $x = parse_config($opts,$config_fname,\@override,$x);
+
+    # Parse the chain file, include all steps, expand variables
+    $x = parse_config($opts,$config_fname,\@override,\%project,$x);
     %project = (%project, %$x);
     if ( !@{$project{steps}} ) { error("No steps defined in the pipeline: $config_fname\n\n"); }
 
@@ -397,14 +408,24 @@ sub parse_config_value
 
 sub parse_config
 {
-    my ($opts,$fname,$override,$config) = @_;
+    my ($opts,$fname,$override,$project,$config) = @_;
+
+    # Include all steps, expand variables
     for my $step (@{$$config{steps}})
     {
         if ( !exists($$config{$step}) ) { error("Step \"$step\" undefined in $fname\n"); }
 
         for my $key (keys %{$$config{$step}})
         {
-            if ( $key ne 'include' ) { push @$override, ["$step/$key",$$config{$step}{$key}]; next; }
+            # Step definition in the chain file. With the exception of include's
+            # see if the  value can be expanded, then use it to override step's config
+            if ( $key ne 'include' ) 
+            {
+                my $value = $$config{$step}{$key};
+                $value = expand_vars($project,$project,$value);
+                push @$override, ["$step/$key",$value]; 
+                next; 
+            }
 
             my $config_fname = "$$opts{dropbox_conf}/$$config{$step}{include}";
             open(my $fh,'<',$config_fname) or error("$config_fname: $!");
@@ -472,11 +493,6 @@ sub expand_vars
             $str = $` . $1 . $$project{$2} . $'; 
             next; 
         }
-        else
-        {
-            $str = $` . $1 . $2 . $';       # replace "$(string)" with "string" if key "string" is not present
-            next;
-        }
     }
     return $str;
 }
@@ -505,7 +521,7 @@ sub run_project
     debug_msg($opts,"Checking status: $name\n");
     for my $step (@{$$project{steps}})
     {
-        my $prefix = "$$opts{dropbox_tmp}/$$project{alias}/$name";
+        my $prefix = $$project{prefix};
         debug_msg($opts, "Checking step: $prefix.$step.done\n");
         if ( -e "$prefix.$step.done" ) 
         { 
@@ -528,10 +544,9 @@ sub run_project
         my $cwd;
         if ( $$project{chdir_into_project} )
         {
-            print STDERR "chdir $$opts{dropbox_tmp}/$$project{alias}\n";
+            print STDERR "chdir $$opts{dropbox_tmp}/$$project{run_id}\n";
             $cwd = getcwd;
-            chdir("$$opts{dropbox_tmp}/$$project{alias}");
-            $$project{prefix} = $name;
+            chdir("$$opts{dropbox_tmp}/$$project{run_id}");
         }
         my $ret = run_step($opts,$project,$step);
         if ( defined $cwd ) { chdir($cwd); }
@@ -541,7 +556,7 @@ sub run_project
         if ( $? ) { confess "touch $prefix.$step.done"; }
     }
     clean_project($opts,$project);
-    send_email($project,"The project \"$name\" finished","The project \"$name\" finished:\n\t$$opts{dropbox_out}/$$project{alias}");
+    send_email($project,"The project \"$name\" finished","The project \"$name\" finished:\n\t$$opts{dropbox_out}/$$project{run_id}");
 }
 
 sub cmd
@@ -611,7 +626,7 @@ sub run_step
                 my $msg = 
                         "\n---\nError: unexpected signal/status ($signal/$status) from the command:\n" .
                         "\t$cmd\n\n".
-                        "Working directory:\n\t$$opts{dropbox_tmp}/$$project{alias}/\n\n".
+                        "Working directory:\n\t$$opts{dropbox_tmp}/$$project{run_id}/\n\n".
                         "Standard output:\n$out\n\n".
                         "Error output:\n$err\n---\n\n";
 
@@ -643,15 +658,20 @@ sub send_err_email
     if ( !exists($$opts{email}) ) { return; }
     if ( exists($$opts{err_period}) )
     {
-        my $err_file = "$$opts{dir}/$$opts{prefix}.err";
+        my $err_file = "$$opts{prefix}.err";
         if ( -e $err_file ) 
         {
-            if ( !update_after_delta($err_file,$$opts{err_period}) ) { return; }
+            if ( !update_after_delta($err_file,$$opts{err_period}*60) ) { return; }
         }
         open(my $fh,'>',$err_file) or error("$err_file: $!");
         my $now = time();
         print $fh $now;
         close($fh) or error("$err_file: close failed");
+
+        my $log_file = "$$opts{prefix}.log";
+        open($fh,'>',$log_file) or error("$log_file: $!");
+        print $fh @msg;
+        close($fh) or error("$log_file: close failed");
     }
     send_email($opts, $status, @msg);
 }
