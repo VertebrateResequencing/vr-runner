@@ -521,7 +521,7 @@ sub run_project
     debug_msg($opts,"Checking status: $name\n");
     for my $step (@{$$project{steps}})
     {
-        my $prefix = $$project{prefix};
+        my $prefix = "$$opts{dropbox_tmp}/$$project{run_id}/$name";
         debug_msg($opts, "Checking step: $prefix.$step.done\n");
         if ( -e "$prefix.$step.done" ) 
         { 
@@ -529,8 +529,7 @@ sub run_project
             next; 
         }
         if ( ! -e $prefix ) { system("mkdir -p $prefix.$step"); }
-        $$project{prefix} = $prefix;
-        $$project{step}   = $step;
+        $$project{step} = $step;
 
         if ( exists($$project{$step}{config}) && !-e "$prefix.$step.conf" )
         {
