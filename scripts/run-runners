@@ -543,7 +543,7 @@ sub run_project
         my $cwd;
         if ( $$project{chdir_into_project} )
         {
-            print STDERR "chdir $$opts{dropbox_tmp}/$$project{run_id}\n";
+            debug_msg($opts,"chdir $$opts{dropbox_tmp}/$$project{run_id}\n");
             $cwd = getcwd;
             chdir("$$opts{dropbox_tmp}/$$project{run_id}");
         }
