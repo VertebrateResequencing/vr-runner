@@ -305,9 +305,16 @@ sub clean_project
         }
         else
         {
-            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}");
+            my $dir = "$$opts{dropbox_out}/$$project{run_id}";
+            my $dst = "$$opts{dropbox_out}/$$project{run_id}";
+            if ( defined($$project{outputs}{$outdir}) )
+            {
+                $dst = $$project{outputs}{$outdir};
+                if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
+            }
+            cmd($opts,"mkdir -p $dir");
             my $path = expand_vars($opts,$project,$outdir);
-            cmd($opts,"mv $path $$opts{dropbox_out}/$$project{run_id}/");
+            cmd($opts,"mv $path $dst");
         }
     }
 
@@ -561,6 +568,8 @@ sub run_project
 sub cmd
 {
     my ($opts,$cmd) = @_;
+
+    if ( $$opts{verbose} ) { print STDERR "$cmd\n"; }
 
     my $tmp = $$opts{lock} ? $$opts{lock} : "/tmp/runners.$$";
     open(my $stderr,'>',"$tmp.e") or confess("$tmp.e: $!");
