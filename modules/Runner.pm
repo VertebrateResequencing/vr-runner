@@ -905,7 +905,7 @@ sub wait
                 }
 
                 # Increase memory limits if necessary: by a set minimum or by a percentage, which ever is greater
-                my %limits = $js->past_limits($ids[$i],$wfile);
+                my %limits = $js->past_limits($task);
                 if ( exists($limits{MEMLIMIT}) )
                 { 
                     my $mem = $limits{memory}*1.3 > $limits{memory}+1_000 ? $limits{memory}*1.3 : $limits{memory}+1_000;

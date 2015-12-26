@@ -172,6 +172,22 @@ sub set_limits
     $$self{limits} = { %{$$self{limits}}, %limits };
 }
 
+=head2 past_limits
+
+    About : Return a hash with the maximum required limits for this job so far.
+            This is necessary for increasing limits of a failing job. Currently
+            only MEMLIMIT is checked for by Runner.pm.
+    Usage : $self->past_limits($job);
+    Args  : An object returned by get_jobs
+
+=cut
+
+sub past_limits
+{
+    my ($self,$task) = @_; 
+    return ();
+}
+
 =head2 clean_jobs
 
     About : Clean temporary data after a job has finished. This has been
@@ -197,22 +213,6 @@ sub clean_jobs
 sub kill_job
 {
     my ($self,$job) = @_;
-}
-
-=head2 past_limits
-
-    About : Return a hash with the maximum required limits for this job so far.
-            This is necessary for increasing limits of a failing job. Currently
-            only MEMLIMIT is checked for by Runner.pm.
-    Usage : $self->past_limits($job);
-    Args  : An object returned by get_jobs
-
-=cut
-
-sub past_limits
-{
-    my ($self,$jid,$output) = @_; 
-    return ();
 }
 
 =head2 run_jobs

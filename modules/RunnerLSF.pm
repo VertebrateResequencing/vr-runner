@@ -213,8 +213,7 @@ sub init_jobs
         my $info = $self->_parse_output($$ids[$i], $path);
         if ( defined $info )
         {
-            $jobs_out[$i]{status} = $$info{status};
-            $jobs_out[$i]{nfailures} = $$info{nfailures};
+            $jobs_out[$i] = { %{$jobs_out[$i]}, %$info };
         }
     }
     return \@jobs_out;
@@ -400,6 +399,7 @@ sub _parse_output
     # collect command lines and exit status to detect non-critical
     # cr_restart exits
     my @attempts = ();
+    my $mem_killed = 0;
 
     open(my $fh,'<',$fname) or confess("$fname: $!");
     while (my $line=<$fh>)
@@ -425,6 +425,14 @@ sub _parse_output
         # Do not count checkpoint and owner kills as a failure. 
         if ( $line =~ /^TERM_CHKPNT/ && $$out{nfailures} ) { $$out{nfailures}--; }
         if ( $line =~ /^TERM_OWNER/ && $$out{nfailures} ) { $$out{nfailures}--; }
+        if ( $line =~ /^TERM_MEMLIMIT:/) { $mem_killed = 1; next; }
+        if ( $line =~ /^\s+Max Memory\s+:\s+(\S+)\s+(\S+)/) 
+        {
+            my $mem = $1;
+            if ($2 eq 'KB') { $mem /= 1024; }
+            elsif ($2 eq 'GB') { $mem *= 1024; }
+            if ( !exists($$out{memory}) or $$out{memory}<$mem ) { $$out{memory} = $mem; }
+        }
     }
     close($fh);
     for (my $i=0; $i<@attempts; $i++)
@@ -435,34 +443,22 @@ sub _parse_output
             $$out{nfailures}--;
         }
     }
+    if ( $mem_killed ) { $$out{MEMLIMIT} = $$out{memory}; }
     return $out;
 }
 
 sub past_limits
 {
-    my ($self,$jid,$output) = @_; 
-    my $fname = "$output.$jid.o";
-    if ( ! -e $fname ) { return (); }
-    open(my $fh,'<',$fname) or confess("$fname: $!");
-    my (%out,$killed,$mem);
-    while (my $line=<$fh>)
+    my ($self,$task) = @_; 
+    my %out = ();
+    if ( exists($$task{MEMLIMIT}) )
     {
-        if ( $line=~/^TERM_MEMLIMIT:/) { $killed = 1; }
-        elsif ( $line=~/^\s+Max Memory\s+:\s+(\S+)\s+(\S+)/) 
-        { 
-            $mem = $1;
-            if ($2 eq 'KB') { $mem /= 1024; }
-            elsif ($2 eq 'GB') { $mem *= 1024; }
-
-            if ( !exists($out{memory}) or $out{memory}<$mem )
-            {
-                $out{memory} = $mem;
-                if ( $killed ) { $out{MEMLIMIT} = $mem; }
-                else { delete($out{MEMLIMIT}); }
-            }
-        }
+        $out{MEMLIMIT} = $$task{MEMLIMIT};
     }
-    close($fh);
+    if ( exists($$task{memory}) )
+    {
+        $out{memory} = $$task{memory};
+    }
     return %out;
 }
 
