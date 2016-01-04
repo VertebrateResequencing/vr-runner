@@ -508,7 +508,7 @@ sub init_chunks
     }
     else
     {
-        $regions = read_regions($$self{regions});
+        $regions = $self->read_regions($$self{regions});
     }
 
     my @chunks;
