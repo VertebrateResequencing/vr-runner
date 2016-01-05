@@ -79,9 +79,9 @@ sub parse_params
     $$opts{dropbox_conf} = "$$opts{dropbox}.conf";
 
     if ( !-d $$opts{dropbox_conf} ) { error("Incorrect dropbox prefix, the directory not found: $$opts{dropbox_conf}\n\n"); }
-    if ( !-e $$opts{dropbox_in} ) { `mkdir -p $$opts{dropbox_in}`; }
-    if ( !-e $$opts{dropbox_out} ) { `mkdir -p $$opts{dropbox_out}`; }
-    if ( !-e $$opts{dropbox_tmp} ) { `mkdir -p $$opts{dropbox_tmp}`; }
+    if ( !-e $$opts{dropbox_in} ) { `mkdir -p '$$opts{dropbox_in}'`; }
+    if ( !-e $$opts{dropbox_out} ) { `mkdir -p '$$opts{dropbox_out}'`; }
+    if ( !-e $$opts{dropbox_tmp} ) { `mkdir -p '$$opts{dropbox_tmp}'`; }
     if ( !exists($$opts{err_period}) ) { $$opts{err_period} = 60; }
 
     return $opts;
@@ -272,7 +272,7 @@ sub list_projects
         $project   = parse_project($opts,$$opts{dropbox_in},$name,$run_id);
         if ( !defined $project ) { next; }
 
-        system("mkdir -p $$opts{dropbox_tmp}/$$project{run_id}");
+        system("mkdir -p '$$opts{dropbox_tmp}/$$project{run_id}'");
         system("mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name");
         if ( $? ) { confess "mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name"; }
 
@@ -296,7 +296,7 @@ sub clean_project
         if ( ref($$project{outputs}{$outdir}) eq 'ARRAY' )
         {
             # create a subdirectory '$outdir' and copy all listed files in there
-            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/$outdir");
+            cmd($opts,"mkdir -p '$$opts{dropbox_out}/$$project{run_id}/$outdir'");
             for my $file (@{$$project{outputs}{$outdir}})
             {
                 my $path = expand_vars($opts,$project,$file);
@@ -312,13 +312,13 @@ sub clean_project
                 $dst = $$project{outputs}{$outdir};
                 if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
             }
-            cmd($opts,"mkdir -p $dir");
+            cmd($opts,"mkdir -p '$dir'");
             my $path = expand_vars($opts,$project,$outdir);
             cmd($opts,"mv $path $dst");
         }
     }
 
-    cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/tmp-data");
+    cmd($opts,"mkdir -p '$$opts{dropbox_out}/$$project{run_id}/tmp-data'");
     cmd($opts,"mv $$opts{dropbox_tmp}/$$project{run_id} $$opts{dropbox_out}/$$project{run_id}/tmp-data");
 }
 
@@ -535,7 +535,7 @@ sub run_project
             debug_msg($opts, "step done: $prefix.$step\n");
             next; 
         }
-        if ( ! -e $prefix ) { system("mkdir -p $prefix.$step"); }
+        if ( ! -e $prefix ) { system("mkdir -p '$prefix.$step'"); }
         $$project{step} = $step;
 
         if ( exists($$project{$step}{config}) && !-e "$prefix.$step.conf" )
