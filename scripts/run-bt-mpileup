@@ -194,6 +194,7 @@ sub main
             $chrs{$chr} = 1;
             if ( $self->is_finished("$outdir/$group/$chr.bcf") ) { next; }
             if ( $self->is_finished("$outdir/$group.bcf") ) { next; }
+            if ( ! -d "$outdir/$group/$chr" ) { $self->cmd("mkdir -p '$outdir/$group/$chr'"); }
             $self->spawn('call_variants',"$outdir/$group/$chr/$chr:$from-$to.bcf",$$groups{$group},$chunk);
         }
     }
