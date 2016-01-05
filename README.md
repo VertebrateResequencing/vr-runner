@@ -3,7 +3,7 @@ The vr-runner package provides a lightweight pipeline framework.
 Runner pipelines
 ----------------
 The runner pipelines are usually named as `run-something`. This document uses
-`run-mpileup` as an example, but the usage is the same for all runners. 
+`run-st-mpileup` as an example, but the usage is the same for all runners. 
 
 For the impatient
 -----------------
@@ -13,9 +13,9 @@ The minimum commands sufficient to install and run the pipelines is:
     git clone git://github.com/VertebrateResequencing/vr-runner.git
 
     # Create a config file, edit, and run
-    run-mpileup +sampleconf > my.conf
+    run-st-mpileup +sampleconf > my.conf
     vim my.conf
-    run-mpileup +config my.conf +loop 600 -o outdir
+    run-st-mpileup +config my.conf +loop 600 -o outdir
 
 Important: see also the section about setting environment variables below!
 
@@ -23,12 +23,12 @@ In more detail
 --------------
 The Runner.pm pipelines have two types of options. The options prefixed by `+` are common to all runners, the options prefixed by `-` are pipeline specific. For a complete list of the options run with `-h`, the output of which is shown at the bottom of this page
 
-    run-mpileup -h
+    run-st-mpileup -h
 
 The pipelines can be run in a daemon mode (turned on by giving the `+loop` option) or they can do one iteration only and stop (`+loop` option not given). The latter is suitable for execution from cron. Because the runner script itself consumes close to zero CPU time and memory, it can be run on farm head nodes. In this mode, it is convenient to run it from screen. For details about how to use screen see the manual pages (man screen), but generally knowing the following is enough:
 
   * Launch a new screen by executing the command `screen`
-  * Type enter and run whatever commands you like. (In our case it will be the run-mpileup command.)
+  * Type enter and run whatever commands you like. (In our case it will be the run-st-mpileup command.)
   * Detach from the screen by pressing `ctrl+a` followed by `d`
   * At any time one can reattach to a running screen by executing `screen -r`
 
@@ -47,7 +47,7 @@ to change user's profile. It may look like this:
 
 Save the config in the file, say `~/.vrw/runners` and use like this:
 
-    vr-wrapper ~/.vrw/runners run-mpileup +config my.conf +loop 600 -o outdir
+    vr-wrapper ~/.vrw/runners run-st-mpileup +config my.conf +loop 600 -o outdir
 
 
 Chaining multiple runners
