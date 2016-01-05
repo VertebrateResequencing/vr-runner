@@ -1120,7 +1120,7 @@ sub _get_temp_prefix
     my $dir  = $self->_get_temp_dir($fname);
     if ( ! -d $dir ) 
     { 
-        `mkdir -p $dir`; 
+        `mkdir -p '$dir'`;
         if ( $? ) { $self->throw("Cannot create directory [$dir]: $!"); }
     }
     return "$dir/$file";
@@ -1140,7 +1140,7 @@ sub _mkdir
 {
     my ($self,$fname) = @_;
     $fname =~ s{[^/]+$}{};
-    if ( !-e $fname ) { `mkdir -p $fname`; }
+    if ( !-e $fname ) { `mkdir -p '$fname'`; }
     return $fname;
 }
 

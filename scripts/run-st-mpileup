@@ -381,7 +381,7 @@ sub clean
 sub runtime_stats
 {
     my ($self,$outfile) = @_;
-    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("mkdir -p '$outfile.part'");
     $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
     open(my $fh,'>',"$outfile.part/info.txt") or $self->throw("$outfile.part/info.txt: $!");
     print $fh $$self{_about};
@@ -395,7 +395,7 @@ sub save_config
     my $src = $$self{_config};
     my $dst = "$$self{outdir}/mpileup.conf";
     if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
-    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p '$$self{outdir}'"); }
     open(my $fh,'>',$dst) or $self->throw("$dst: $!");
     my $about = $$self{_about};
     $about =~ s/\n/\n# /g;
@@ -430,14 +430,14 @@ sub check_sanity
     {
         if ( !exists($bam_pls{$pl}) ) { $self->throw("The platform \"$pl\" not present in any of the BAMs.\n"); }
     }
-    `mkdir -p $$self{outdir}`;
+    `mkdir -p '$$self{outdir}'`;
     $self->cmd("touch $$self{outdir}/sanity_checked");
 }
 
 sub open_file
 {
     my ($self,$file) = @_;
-    if ( ($file=~m{^(.+)/[^/]+$}) && ! -d $1 ) { $self->cmd("mkdir -p $1"); }
+    if ( ($file=~m{^(.+)/[^/]+$}) && ! -d $1 ) { $self->cmd("mkdir -p '$1'"); }
     open(my $fh,'>',$file) or $self->throw("$file: $!");
     return $fh;
 }
@@ -819,7 +819,7 @@ sub all_site_bcfs
     my $outdir = $$self{outdir};
     my $bam_list = "$outdir/lists/chr$chr-$pop.list";
 
-    `mkdir -p $outdir/$pop/$chr/` unless -d "$outdir/$pop/$chr";
+    `mkdir -p '$outdir/$pop/$chr/'` unless -d "$outdir/$pop/$chr";
     my $cmd = "$$self{mpileup} -g -r $chr:$from-$to -b $bam_list -f $$self{fa_ref} > $outfile.part";
     $self->cmd($cmd);
 
@@ -837,7 +837,7 @@ sub call_variants
 
     $self->set_chunk_options($chr,$from,$to);
 
-    `mkdir -p $outdir/$pop/$chr/` unless -d "$outdir/$pop/$chr";
+    `mkdir -p '$outdir/$pop/$chr/'` unless -d "$outdir/$pop/$chr";
 
     # Create sample list with correct ploidy info
     my $sample_list = "$outdir/$pop/$chr/$chr:$from-$to.samples";

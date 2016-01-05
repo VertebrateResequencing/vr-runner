@@ -229,7 +229,7 @@ sub mrProper
 sub runtime_stats
 {
     my ($self,$outfile) = @_;
-    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("mkdir -p '$outfile.part'");
     $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
@@ -468,7 +468,7 @@ sub ref_to_shapeit
     my $outdir = $outfile;
     $outdir =~ s{/[^/]*$}{};
     my $ref_vcf = $self->expand_chrom($$self{ref_vcf},$chr);
-    $self->cmd(qq[mkdir -p $outdir]);
+    $self->cmd(qq[mkdir -p '$outdir']);
     $self->cmd(qq[$$self{bcftools} convert -r $chr:$from-$to $ref_vcf --haplegendsample $outfile.part]);
     rename("$outfile.part.samples","${prefix}_samples") or $self->throw("rename $outfile.part.samples ${prefix}_samples: $!");
     rename("$outfile.part.legend.gz","${prefix}_legend.gz") or $self->throw("rename $outfile.part.legend.gz ${prefix}_legend.gz: $!");
@@ -543,7 +543,7 @@ sub vcf_to_shapeit
     my $to   = $$chunk[2];
     my $outdir = "$$self{outdir}/$chr";
     my $in_vcf = $self->expand_chrom($$self{in_vcf},$chr);
-    $self->cmd(qq[mkdir -p $outdir]);
+    $self->cmd(qq[mkdir -p '$outdir']);
     $self->cmd(qq[$$self{bcftools} view -r $chr:$from-$to -g ^miss -Ou $in_vcf | $$self{bcftools} convert --gensample $outdir/01.vcf_to_shapeit.$from-$to]);
     if ( exists($$self{fams}) ) { $self->set_families("$outdir/01.vcf_to_shapeit.$from-$to.samples"); }
     $self->cmd(qq[touch $outfile]);
@@ -640,7 +640,7 @@ sub save_config
     my $src = $$self{_config};
     my $dst = "$$self{outdir}/shapeit.conf";
     if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
-    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p '$$self{outdir}'"); }
     open(my $fh,'>',$dst) or $self->throw("$dst: $!");
     my $about = $$self{_about};
     $about =~ s/\n/\n# /g;

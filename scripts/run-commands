@@ -76,7 +76,7 @@ sub main
     $self->parse_args();
 
     my @files = $self->list_files($$self{glob});
-    `mkdir -p $$self{outdir}`;
+    `mkdir -p '$$self{outdir}'`;
 
     for my $file (@files)
     {
@@ -135,7 +135,7 @@ sub run_command
 {
     my ($self,$outfile,$file) = @_;
     my $tmpdir = "$$self{outdir}/tmp.$file";
-    $self->cmd("mkdir -p $tmpdir");
+    $self->cmd("mkdir -p '$tmpdir'");
     for my $cmd (@{$$self{cmds}})
     {
         my $task = $self->expand_task(cmd=>$cmd,name=>$file,tmpdir=>$tmpdir);

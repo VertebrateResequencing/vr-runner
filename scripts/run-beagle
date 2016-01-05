@@ -266,7 +266,7 @@ sub mrProper
 sub runtime_stats
 {
     my ($self,$outfile) = @_;
-    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("mkdir -p '$outfile.part'");
     $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
@@ -473,7 +473,7 @@ sub beagle
 
     if ( !-e "$prefix.vcf.gz" or $$self{redo_beagle} )
     {
-        $self->cmd(qq[mkdir -p $outdir]);
+        $self->cmd(qq[mkdir -p '$outdir']);
         my $mem = int($self->get_limits('memory') * 0.8);
         if ( $mem<=0 ) { $mem = 500; }
         my $known = defined $known_vcf ? "ref=$known_vcf" : '';
@@ -576,7 +576,7 @@ sub save_config
     my $src = $$self{_config};
     my $dst = "$$self{outdir}/beagle.conf";
     if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
-    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p '$$self{outdir}'"); }
     open(my $fh,'>',$dst) or $self->throw("$dst: $!");
     my $about = $$self{_about};
     $about =~ s/\n/\n# /g;

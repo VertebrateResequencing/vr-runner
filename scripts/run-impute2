@@ -289,7 +289,7 @@ sub mrProper
 sub runtime_stats
 {
     my ($self,$outfile) = @_;
-    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("mkdir -p '$outfile.part'");
     $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
@@ -540,7 +540,7 @@ sub vcf_to_impute2
 
     if ( $$self{phased_only} ) { $self->throw("todo: phased_only"); }
 
-    $self->cmd(qq[mkdir -p $outdir]);
+    $self->cmd(qq[mkdir -p '$outdir']);
 
     if ( exists($$self{known_vcf}) && !$self->known_hapref_exists($chr,"$from-$to") )
     {
@@ -614,7 +614,7 @@ sub impute2
                 $knowns .= " -h $known${i}.hap.gz -l $known${i}.legend.gz";
             }
             my $rg_prefix = "$$self{known_hapref}/$chr/$from-$to.ref";
-            $self->cmd(qq[mkdir -p $$self{known_hapref}/$chr/]);
+            $self->cmd(qq[mkdir -p '$$self{known_hapref}/$chr/']);
             $self->cmd(qq[$CMD $knowns -merge_ref_panels -o $rg_prefix -merge_ref_panels_output_ref $rg_prefix]);
 
             unlink("$rg_prefix.hap.samples.part");
@@ -746,7 +746,7 @@ sub save_config
     my $src = $$self{_config};
     my $dst = "$$self{outdir}/impute2.conf";
     if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
-    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p '$$self{outdir}'"); }
     open(my $fh,'>',$dst) or $self->throw("$dst: $!");
     my $about = $$self{_about};
     $about =~ s/\n/\n# /g;
