@@ -327,7 +327,7 @@ sub _read_jobs
     my %running = ();
     for my $cmd (@running)
     {
-        if ( !($cmd=~/^(\d+)\s+(.*)$/) ) { next; }
+        if ( !($cmd=~/^\s*(\d+)\s+(.*)\s*$/) ) { next; }
         $running{$1} = $2;
     }
     my $script_name = $0;
