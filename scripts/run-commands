@@ -35,6 +35,17 @@ sub new
             glob => [qw(*.vcf.gz *.bcf)],
 
             # Config variables can be referenced using curly brackets ({variable}).
+            # The following variables are pre-defined:
+            #   {outdir} .. alias for the argument to --outdir
+            #   {in}     .. input file name (includes the directory part)
+            #   {name}   .. output file name (relative), generated from basename of {in}.
+            #               In case of name clashes, the suffix "_<int>" is added
+            #               automatically to ensure uniqueness.
+            #   {out}    .. output file, alias for {outdir}/{name}
+            #   {tmpdir} .. working directory, alias for {outdir}/tmp.{name}. Created automatically
+            #               and deleted when finished.
+
+            # Commands to be executed for each input file. For example:
             # cmds => 
             # [
             #     '{bcftools} annotate ... {in} -Ob -o {tmpdir}/1.bcf',
@@ -42,6 +53,12 @@ sub new
             #     '... {tmpdir}/1.bcf {tmpdir}/2.bcf',
             #     '... {tmpdir}/2.bcf {out}',
             # ],
+
+            # Create a mapping (possibly multiple ones) between input and output file names
+            # io_map =>
+            # {
+            #     "{outdir}/mapping.txt" => "{in}\t{out}",
+            # },
     ]."\n";
 
     $$self{usage} .= 
@@ -49,6 +66,7 @@ sub new
         "Usage: run-commands\n" .
         "Options:\n" .
         "   -i, --indir <dir>       Input directory\n" .
+        "   -l, --list <file>       List of input file names\n" .
         "   -o, --outdir <dir>      Output directory\n" .
         "\n";
 
@@ -61,13 +79,13 @@ sub parse_args
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-i' or $arg eq '--indir' ) { $$self{indir}=shift(@ARGV); next; }
+        if ( $arg eq '-l' or $arg eq '--list' ) { $$self{inlist}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
         $self->throw();
     }
     if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
-    if ( !exists($$self{indir}) ) { $self->throw("Expected the -i option."); }
-    if ( !exists($$self{cmds}) ) { $self->throw("Expected the 'cmds' config key."); }
-    if ( !exists($$self{glob}) ) { $self->throw("Expected the 'glob' config key."); }
+    if ( !defined($$self{indir}) && !defined($$self{inlist}) ) { $self->throw("Expected the -i or -l option."); }
+    if ( !defined($$self{cmds}) ) { $self->throw("Expected the 'cmds' config key."); }
 }
 
 sub main
@@ -75,55 +93,122 @@ sub main
     my ($self) = @_;
     $self->parse_args();
 
-    my @files = $self->list_files($$self{glob});
+    my @files = $self->list_files();
+    if ( !@files ) { $self->throw("No files to process?\n"); }
     `mkdir -p $$self{outdir}`;
 
-    for my $file (@files)
+    for my $file (@files) { $self->cmd("mkdir -p $$file{tmpdir}"); }
+
+    for (my $i=0; $i<@{$$self{cmds}}; $i++)
     {
-        $self->spawn('run_command',"$$self{outdir}/$file.done",$file);
+        for my $file (@files)
+        {
+            my $cmd  = $$self{cmds}[$i];
+            my $task = $self->expand_vars($cmd,%$file);
+            $self->spawn('run_command',"$$self{outdir}/$$file{name}.$i.done",$task);
+        }
+        $self->wait;
     }
-    $self->wait;
+
+    for my $file (@files) { $self->cmd("rm -rf $$file{tmpdir}"); }
+
+    $self->create_io_map(\@files);
 
     $self->all_done;
+}
+
+sub create_io_map
+{
+    my ($self,$files) = @_;
+    if ( !defined $$self{io_map} ) { return; }
+    for my $map (keys %{$$self{io_map}})
+    {
+        my $map_name = $self->expand_vars($map,%$self);
+        open(my $fh,'>',$map_name) or $self->throw("$map_name: $!");
+        for my $file (@$files)
+        {
+            my $line = $self->expand_vars($$self{io_map}{$map},%$file);
+            print $fh $line."\n";
+        }
+        close($fh) or $self->throw("close failed: $map_name");
+    }
+}
+
+sub unique_name
+{
+    my ($self,$names,$file) = @_;
+    my $new_name = $file;
+    $new_name =~ s{^.*/}{};     # strip directory
+    my $idx = 1;
+    while ( exists($$names{$new_name}) )
+    {
+        $new_name = $file .'_'. $idx;
+        $idx++;
+    }
+    $$names{$new_name} = 1;
+    return $new_name;
 }
 
 sub list_files
 {
     my ($self,$glob) = @_;
+    my %names = ();
     my @files = ();
+    if ( defined($$self{inlist}) )
+    {
+        open(my $fh,'<',$$self{inlist}) or $self->throw("$$self{inlist}: $!");
+        while (my $file=<$fh>)
+        {
+            if ( $file=~/^\s*$/ ) { next; }
+            if ( $file=~/^#/ ) { next; }
+            $file =~ s/^\s*//;
+            $file =~ s/\s*$//;
+            chomp($file);
+            my $dir = '.';
+            if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
+            my $name = $self->unique_name(\%names,$file);
+            push @files, {indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"};
+        }
+        close($fh) or $self->throw("$$self{inlist}: $!");
+        return @files;
+    }
     if ( !-d $$self{indir} && -e $$self{indir} )
     {
         my $file = $$self{indir};
-        if ( $file=~m{([^/]+)$} ) { $$self{indir} = $`; $file = $1; }
-        return ($file); 
+        my $dir = '.';
+        if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
+        my $name = $file;
+        return ({indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"});
     }
-    for my $expr (@$glob)
+    if ( !defined($$self{glob}) ) { $self->throw("Missing the 'glob' config key."); }
+    for my $expr (@{$$self{glob}})
     {
-        if ( $expr=~m{/} ) { $self->throw("Directories not supported yet: $expr\n"); }  # because of name clashes..
         my @tmp = glob("$$self{indir}/$expr");
         for my $file (@tmp)
         {
-            $file =~ s{^.*/}{};
-            push @files,$file;
+            my $dir = '.';
+            if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
+            my $name = $self->unique_name(\%names,$file);
+            push @files,{indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"};
         }
     }
     return @files;
 }
 
-sub expand_task
+sub expand_vars
 {
-    my ($self,%args) = @_;
+    my ($self,$str,%args) = @_;
+    my $ori = $str;
     my $out = '';
-    my $str = $args{cmd};
     while ( $str=~/{([^}]+)}/ )
     {
         $out .= $`;
         my $key = $1;
-        if ( $key eq 'in' ) { $key = "$$self{indir}/$args{name}"; }
-        elsif ( $key eq 'out' ) { $key = "$$self{outdir}/$args{name}"; }
+        if ( $key eq 'in' ) { $key = "$args{indir}/$args{infile}"; }
+        elsif ( $key eq 'out' ) { $key = "$args{out}"; }
         elsif ( exists($args{$key}) ) { $key = $args{$key}; }
         elsif ( exists($$self{$key}) ) { $key = $$self{$key}; }
-        else { $self->throw("No such key [$key] [$args{cmd}]"); }
+        else { $self->throw("No such key [$key] [$ori]"); }
         $out .= $key;
         $str = $';
     }
@@ -133,15 +218,8 @@ sub expand_task
 
 sub run_command
 {
-    my ($self,$outfile,$file) = @_;
-    my $tmpdir = "$$self{outdir}/tmp.$file";
-    $self->cmd("mkdir -p $tmpdir");
-    for my $cmd (@{$$self{cmds}})
-    {
-        my $task = $self->expand_task(cmd=>$cmd,name=>$file,tmpdir=>$tmpdir);
-        $self->cmd($task,verbose=>1);
-    }
-    $self->cmd("rm -rf $tmpdir");
+    my ($self,$outfile,$cmd) = @_;
+    $self->cmd($cmd,verbose=>1);
     $self->cmd("touch $outfile");
 }
 
