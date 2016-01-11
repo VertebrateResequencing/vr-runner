@@ -66,12 +66,15 @@ The following directory structure is used:
 
 Each pipeline chain consists of a series of steps defined in the `chain.*.conf` and `step.*.conf` files. For examples take a look in the `misc` directory of this distribution. Configs files in this direcotry can be used directly as they are, just symlink them as described above in the description of `prefix.conf`. If the config files are well written, the user only needs to create a small project description and place it in the dropbox input directory:
 
-    config:          chain.gtcheck.conf
-    email:           someone\@somewhere.org
+    .config:         chain.gtcheck.conf
+    .email:          someone\@somewhere.org
     mpileup/alns:    bams.list
     mpileup/fa_ref:  human_g1k_v37.fasta
 
-The project descriptions are small text files which define the input data:
+The project descriptions are small text files which define the input data.
+All keys prefixed with a dot are specific to the project, the rest are config
+keys specific to one or multiple steps:
+
  
     # The pipeline config, known also as the "chain file". Note that in order to
     # avoid the execution of an arbitrary code passed by a malicious user, the config
@@ -82,7 +85,7 @@ The project descriptions are small text files which define the input data:
     # The rest is optional and pipeline-specific. There are a few pipeline-wide 
     # options that are recognised by all pipelines, such as where to send email 
     # notifications about job completion and failures:
-    email: someone@somewhere.org
+    email: someone@somewhere.org someone.else@somewhere.else.org
  
     # Frequency (in minutes) with which to remind about failed jobs, so that
     # the mailbox does not end up cluttered by emails. If not given, the default
@@ -93,16 +96,18 @@ The project descriptions are small text files which define the input data:
     # chain includes a runner step named "step_name" which recognises the config 
     # key "var_name", the default key can be overriden as:
     step_name/var_name: new value
+
+    # If multiple steps share the same config key, a comma-separated list of
+    # steps can be given or leave out the step name to set the key in all steps:
+    step1,step2/var_name: new value
+    var_name: new value
  
-    # Similarly, substrings in a runner's config file can be expanded. For example,
+    # Also substrings in a runner's config file can be expanded. For example,
     # if the config contains the following key-value pair
     #   key => 'some $(value)',
     # the variable "$(value)" can be replaced with "new value":
     step_name/value: new value
-  
-    # Note: if the project description does not specify the "step_name/value" key,
-    # the variable "$(value)" will be replaced with "value".
- 
+
     # In order to preserve compactness of project descriptions yet allowing flexibility,
     # the runner's config files can use default values. For example, if the config
     # contains the following key-value pair
@@ -110,8 +115,13 @@ The project descriptions are small text files which define the input data:
     # the project description file can override the value but in case it does not,
     # the key will be expanded as follows
     #   key => 'some sensible default',
-    #
+
+    # To undefine a pre-defined key, pass "undef"
+    step/key: undef      # undefine a key
+    step/key: 'undef'    # pass string "undef"
+
     # See the misc/*conf files for real-life examples.
+
  
 The pipeline chain can be run from the command line:
  
@@ -120,7 +130,7 @@ The pipeline chain can be run from the command line:
  
 or from cron:
  
-    */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -v -d prefix -L config.lock'    
+    */5 *  *   *   *     vr-wrapper ~/.vrw/runners 'run-runners -i -v -d prefix -L config.lock'    
  
 The vr-wrapper scripts can be used to set environment variables without having to change user's profile. It may look like this:
  
@@ -155,8 +165,25 @@ Frequently (and not so frequently) asked questions
 --------------------------------------------------
 <dl>
 <dt>How to rerun a task</dt>
-<dd>The pipelines know that a task finished by checking the existence of checkpoint files. In order to reduce the number of stat calls, the pipeline keeps a cache of finished tasks. Therefore, to rerun a task, it is not enough to remove the specific checkpoin file, one has to tell the pipeline to ignore the cached status: run the pipeline as usual, but add the <b>+nocache</b> option.
+<dd>The pipelines know that a task finished by checking the existence of
+checkpoint files. In order to reduce the number of stat calls, the pipeline
+keeps a cache of finished tasks. Therefore, to rerun a task, it is not enough
+to remove the specific checkpoint file, one has to tell the pipeline to ignore
+the cached status: run the pipeline as usual, but add the <b>+nocache</b>
+option. Note however, that pipeline's logic can be complex: it can be deleting
+intermediate checkpoint files and relying on information not available to the
+runner framework.
 </dd>
+
+<dt>Performance: the runner daemon takes too long to submit a job!</dt>
+<dd>If a pipeline spawns ten thousands and more simultaneous jobs, the runner daemon can spend
+a long time just by checking the status of pending tasks.
+The number of simultaneous jobs can (and should) be limited by providing the <b>+maxjobs</b>
+option. For example, if the computing farm typically lets you run 500 jobs in parallel, running
+with <b>+maxjobs 800</b> tells the pipeline to submitted the jobs in smaller batches.
+If all jobs are running and none is pending, then increase the limit.
+</dd>
+</dl>
 
 <dt>How to skip a job</dt>
 <dd>If a task keeps failing, the pipeline can be told to skip the offending task by setting negative value of the <b>+retries</b> option. With negative value of +retries, a skip file with the ".s" suffix is created and the job is reported as finished. The skip files are cleaned automatically when +retries is set to a positive value. A non cleanable variant is a force skip ".fs" file which is never cleaned by the pipeline and is created/removed manually by the user. When .fs is cleaned by the user, the pipeline must be run with +nocache in order to notice the change.
@@ -166,3 +193,5 @@ Frequently (and not so frequently) asked questions
 <dd>When something goes wrong and all jobs must be killed, the <b>+kill</b> option does the trick.
 </dd>
 </dl>
+
+
