@@ -1,0 +1,253 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{reads_per_chunk} = 100_000;
+    $$self{samtools} = 'samtools';
+    $$self{bwa}      = 'bwa';
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            # list of fastq, one file per line followed by output file name and RG line:
+            #   file.fastq  out.bam  '@RG\tID:lane1\tSM:60A_Sc_DBVPG6044'
+            fastq  => undef,
+
+            # reference sequence in fasta format
+            fa_ref => undef,
+
+            # executables
+            bwa => 'bwa',
+            samtools => 'samtools',
+
+            # conversion from sam to bam/cram with optional filtering to stream through
+            filter => 'samtools view -b -',
+
+            # split fastq's into smaller chunks to run in parallel
+            reads_per_chunk => ] .$$self{reads_per_chunk}. q[,
+
+            limits => { memory=>3_500 },
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Align fastq files via bwa\n" .
+        "Usage: run-bwa\n" .
+        "Options:\n" .
+        "   -f, --fastq-list <file>     File with fastq files\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "   -r, --ref-fa <file>         Reference sequence in fasta format\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f' or $arg eq '--fastq-list' ) { $$self{fastq}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--ref' ) { $$self{fa_ref}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw("Unknown argument: $arg\n");
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{fastq}) ) { $self->throw("Expected the -f option."); }
+    if ( !defined($$self{fa_ref}) ) { $self->throw("Expected the -r option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+
+    # split fastqs
+    my @files = $self->list_files($$self{fastq});
+    for my $file (@files)
+    {
+        $self->spawn('split_fastq',"$$self{outdir}/$$file{prefix}.chunks",$file);
+    }
+    $self->wait;
+
+    # index fastq files
+    $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+    for my $file (@files)
+    {
+        $$file{chunks} = $self->list_chunks("$$self{outdir}/$$file{prefix}.chunks");
+        for my $chunk (@{$$file{chunks}})
+        {
+            $self->spawn('bwa_aln',"$chunk.sai",$chunk);
+        }
+    }
+    $self->wait;
+
+    # align
+    for my $file (@files)
+    {
+        for my $chunk (@{$$file{chunks}})
+        {
+            $self->spawn('bwa_samse',"$chunk.bam",fastq=>$chunk,sai=>"$chunk.sai",rg=>$$file{rg_line});
+        }
+    }
+    $self->wait;
+
+    # merge
+    for my $file (@files)
+    {
+        $self->spawn('merge',"$$self{outdir}/$$file{aln}",$$file{chunks});
+    }
+    $self->wait;
+
+    $self->clean(@files);
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,@files) = @_;
+    for my $file (@files)
+    {
+        for my $chunk (@{$$file{chunks}})
+        {
+            unlink("$chunk");
+            unlink("$chunk.sai");
+            unlink("$chunk.bam");
+            unlink("$chunk.bam.bai");
+        }
+        unlink("$$self{outdir}/$$file{prefix}.chunks");
+        unlink("$$self{outdir}/$$file{aln}.merge-list");
+    }
+}
+
+sub list_files
+{
+    my ($self,$list) = @_;
+    my @files = ();
+    open(my $fh,'<',$list) or $self->throw("$list: $!");
+    while (my $line=<$fh>)
+    {
+        my @items = split(/\s+/,$line);
+        chomp($items[-1]);
+        my $aln = $items[1];
+        if ( !($aln=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $aln"); }
+        my $prefix = $`;
+        my $file   = { fastq=>$items[0], aln=>$aln, prefix=>$prefix, rg_line=>$items[2] };
+        push @files, $file;
+    }
+    close($fh) or $self->throw("close failed: $list");
+    return @files;
+}
+sub list_chunks
+{
+    my ($self,$file) = @_;
+    my @chunks = ();
+    open(my $fh,'<',$file) or $self->throw("$file: $!");
+    while (my $line=<$fh>)
+    {
+        $line =~ s/\s*$//;
+        $line =~ s/^\s*//;
+        chomp($line);
+        push @chunks,$line;
+    }
+    close($fh) or $self->throw("close failed: $file");
+    return \@chunks;
+}
+
+sub split_fastq
+{
+    my ($self,$outfile,$dat) = @_;
+    open(my $list,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    open(my $in,"gunzip -c $$dat{fastq} |") or $self->throw("gunzip -c $$dat{fastq} failed: $!");
+    my $out    = undef;
+    my $nout   = 0;
+    my $ichunk = 0;
+    while (my $line=<$in>)
+    {
+        if ( $nout >= $$self{reads_per_chunk}*4 )
+        {
+            close($out) or $self->throw("close failed: $outfile.$ichunk");
+            $out = undef;
+        }
+        if ( !defined $out )
+        {
+            $nout = 0;
+            $ichunk++;
+            if ( $$self{debug_chunks} && $ichunk > $$self{debug_chunks} ) { last; }
+            open($out,"| gzip -c > $outfile.$ichunk") or $self->throw("gzip -c > $outfile.$ichunk: $!");
+            print $list "$outfile.$ichunk\n";
+        }
+        print $out $line;
+        $nout++;
+    }
+    if ( defined $out )
+    {
+        close($out) or $self->throw("close failed: $outfile.$ichunk");
+    }
+    close($in) or ($$self{debug_chunks} || $self->throw("close failed: gunzip -c $$dat{fastq} failed"));
+    close($list) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bwa_aln
+{
+    my ($self,$sai,$fastq) = @_;
+    $self->cmd("$$self{bwa} aln $$self{fa_ref} $fastq > $sai.part");
+    rename("$sai.part",$sai) or $self->throw("rename $sai.part $sai: $!");
+}
+
+sub bwa_samse
+{
+    my ($self,$bam,%args) = @_;
+    my $fastq   = $args{fastq};
+    my $sai     = $args{sai};
+    my $rg_line = $args{rg};
+    my $filter  = $$self{filter} ? "| $$self{filter}" : '';
+    $self->cmd(qq[$$self{bwa} samse $$self{fa_ref} -r '$rg_line' $sai $fastq $filter | $$self{samtools} sort - $bam.part]);
+    $self->cmd("$$self{samtools} index $bam.part.bam");
+    rename("$bam.part.bam.bai","$bam.bai") or $self->throw("rename $bam.part.bam.bai $bam.bai: $!");
+    rename("$bam.part.bam",$bam) or $self->throw("rename $bam.part.bam $bam: $!");
+}
+
+sub merge
+{
+    my ($self,$bam,$chunks) = @_;
+    open(my $fh,'>',"$bam.merge-list") or $self->throw("$bam.merge-list");
+    for my $chunk (@$chunks)
+    {
+        print $fh "$chunk.bam\n";
+    }
+    close($fh) or $self->throw("close failed: $bam.merge-list");
+    $self->cmd(qq[$$self{samtools} merge -fc -b $bam.merge-list $bam.part]);
+    $self->cmd("$$self{samtools} index $bam.part");
+    $self->cmd("$$self{samtools} stats -r $$self{fa_ref} $bam.part > $bam.bchk");
+    rename("$bam.part.bai","$bam.bai") or $self->throw("rename $bam.part.bai $bam.bai: $!");
+    rename("$bam.part",$bam) or $self->throw("rename $bam.part $bam: $!");
+}
+

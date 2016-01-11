@@ -1,0 +1,709 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{sex} = '{Y} < {22}*0.1 ? "F" : "M"',
+    $$self{samtools} = 'samtools';
+    $$self{plot_stats} = 'plot-bamstats';
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            # List of bams, one file per line, or a directory with bams. Multiple
+            # files or directories can be given as an array
+            bams => undef,
+
+            # reference sequence in fasta format and gc_stats produced by `plot-bamstats -s`
+            fa_ref       => undef,
+            fa_ref_stats => undef,
+
+            # Check that fa_ref md5 is the same as in bam headers. If set, the key should point
+            # to a template bam header with M5 in @SQ lines
+            fa_ref_md5   => undef,
+
+            # include only reads that will be used by mpileup
+            filter => 'UNMAP,SECONDARY,QCFAIL,DUP',
+
+            # minimum percentage of mapped bases
+            min_mapped_bases      => 90,
+
+            # maximum error rate (percent of base mismatches)
+            max_error_rate        => 2,
+
+            # maximum percentage of duplicate reads
+            max_dup_reads         => 8,
+
+            # minimum percentage of mapped reads which are properly aligned (after rmdup)
+            min_paired_reads      => 80,
+
+            # maximum percentage of bases duplicated due to overlapping reads of a pair
+            max_overlap_bases     => 4,
+
+            # maximum insertion to deletion ratio
+            max_indel_ratio       => 0.82,
+
+            # minimum insertion to deletion ratio
+            min_indel_ratio       => 0.68,
+
+            # maximum indels per cycle, factor above median
+            max_indel_per_cycle   => 3,
+
+            # minimum percentage of reads (80%) within 25% of the main insert peak
+            min_inserts_within    => [80,25],
+
+            # mark samples as F if the number of reads mapped to chrY is 10x smaller
+            # than the number of reads mapped to chr22, otherwise mark as M. The default
+            # setting works well for human where chrY is about the same size as chr22.
+            sex => '] .$$self{sex}. q[',
+
+            # executables
+            samtools => 'samtools',
+            plot_stats => 'plot-bamstats',
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Align fastq files via bwa\n" .
+        "Usage: run-bwa\n" .
+        "Options:\n" .
+        "   -b, --bams-list <file>      File or directory with bam files\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "   -r, --ref-fa <file>         Reference sequence in fasta format\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bams-list' ) { push @{$$self{bams}},shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--ref' ) { $$self{fa_ref}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-h' or $arg eq '-?' or $arg eq '--help' ) { $self->throw(); }
+        $self->throw("Unknown argument: $arg\n");
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{bams}) ) { $self->throw("Expected the -b option."); }
+    if ( !defined($$self{fa_ref}) ) { $self->throw("Expected the -r option."); }
+    if ( !defined($$self{fa_ref_stats}) )
+    {
+        if ( !-e "$$self{fa_ref}.gc_stats" ) { $self->warn("Plots will be incomplete, the reference gc_stats not given\n"); }
+        else { $$self{fa_ref_stats} = "$$self{fa_ref}.gc_stats"; }
+    }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+
+    my @files = $self->list_files($$self{bams});
+    for my $file (@files)
+    {
+        $self->spawn('bam_stats',"$$self{outdir}/$$file{prefix}.stats",$file);
+        $self->spawn('determine_sex',"$$self{outdir}/$$file{prefix}.sex",$$file{bam});
+    }
+    $self->wait;
+
+    $self->spawn('create_stats',"$$self{outdir}/index.html",\@files);
+    $self->wait;
+
+    $self->clean(@files);
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,@files) = @_;
+}
+
+sub list_files
+{
+    my ($self,$list) = @_;
+    my @files = ();
+    my $names = {};
+    if ( ref($list) ne 'ARRAY' ) { $list = [ $list ]; }
+    for my $file ( @$list )
+    {
+        push @files,$self->get_file_list($names,$file);
+    }
+    return @files;
+}
+sub get_file_list
+{
+    my ($self,$names,$list) = @_;
+    my @files = ();
+    if ( -d $list )
+    {
+        opendir(my $dh,$list) or $self->throw("$list: $!");
+        while ( my $file = readdir($dh) ) 
+        {
+            if ( !($file=~/\.bam$/i ) ) { next; }
+            if ( !($file=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $file"); }
+            my $prefix = $self->unique_name($names,$`);
+            $file    = "$list/$file";
+            my $file = { bam=>$file, prefix=>$prefix };
+            push @files, $file;
+        }
+        closedir($dh) or $self->throw("closedir failed: $list");
+    }
+    else
+    {
+        open(my $fh,'<',$list) or $self->throw("$list: $!");
+        while (my $line=<$fh>)
+        {
+            chomp($line);
+            if ( !($line=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $line"); }
+            $line =~ s/^\s*//;
+            $line =~ s/\s*$//;
+            if ( $line=~/^\s*$/ ) { next; }
+            if ( $line=~/^\#/ ) { next; }
+            my $prefix = $self->unique_name($names,$`);
+            my $file   = { bam=>$line, prefix=>$prefix };
+            push @files, $file;
+        }
+        close($fh) or $self->throw("close failed: $list");
+    }
+    return @files;
+}
+sub unique_name
+{
+    my ($self,$names,$file) = @_;
+    my $new_name = $file;
+    $new_name =~ s{^.*/}{};     # strip directory
+    my $idx = 1;
+    while ( exists($$names{$new_name}) )
+    {
+        $new_name = $file .'_'. $idx;
+        $idx++;
+    }
+    $$names{$new_name} = 1;
+    return $new_name;
+}
+
+sub parse_header_md5
+{
+    my ($self,$fh) = @_;
+    my %out = ();
+    while (my $line=<$fh>)
+    {
+        if ( !($line=~/^\@SQ/ ) ) { next; }
+        if ( !($line=~/\tM5:(\S+)/) ) { next; }
+        my $md5 = $1;
+        if ( !($line=~/\tSN:(\S+)/) ) { next; }
+        my $chr = $1;
+        $out{$chr} = $md5;
+    }
+    return \%out;
+}
+sub check_md5
+{
+    my ($self,$ref_hdr,$bam) = @_;
+
+    open(my $fh,'<',$ref_hdr) or $self->throw("$ref_hdr: $!");
+    my $ref_md5 = $self->parse_header_md5($fh);
+    close($fh) or $self->throw("close failed: $ref_hdr");
+
+    open($fh,"$$self{samtools} view -H $bam |")  or $self->throw("$$self{samtools} view -H $bam: $!");
+    my $bam_md5 = $self->parse_header_md5($fh);
+    close($fh) or $self->throw("close failed: $$self{samtools} view -H $bam");
+
+    for my $chr (keys %$bam_md5)
+    {
+        if ( !exists($$ref_md5{$chr}) ) { next; }   # cannot check
+        if ( $$ref_md5{$chr} ne $$bam_md5{$chr} ) { $self->throw("MD5 mismatch for $chr:\n\t$$ref_md5{$chr}\t$ref_hdr\n\t$$bam_md5{$chr}\t$bam\n"); }
+    }
+}
+
+sub bam_stats
+{
+    my ($self,$outdir,$dat) = @_;
+
+    if ( $$self{fa_ref_md5} )
+    {
+        $self->check_md5($$self{fa_ref_md5},$$dat{bam});
+    }
+
+    my $filter = '';
+    if ( $$self{filter} )
+    {
+        my @out = $self->cmd("$$self{samtools} flags '$$self{filter}'");
+        @out = split(/\s+/,$out[0]);
+        $filter = "-F $out[0]";
+    }
+
+    my $bchk = "$$self{outdir}/$$dat{prefix}.bchk";
+    if ( !$self->is_finished("$bchk.bchk") )
+    {
+        if ( -e "$$dat{bam}.bchk" ) 
+        { 
+            $self->cmd("cp $$dat{bam}.bchk $bchk.part"); 
+        }
+        else
+        {
+            $self->cmd("$$self{samtools} stats $filter -r $$self{fa_ref} $$dat{bam} > $bchk.part");
+        }
+        rename("$bchk.part",$bchk) or $self->throw("rename $bchk.part $bchk: $!");
+    }
+    my $gc_stats = $$self{fa_ref_stats} ? "-r $$self{fa_ref_stats}" : '';
+    $self->cmd("$$self{plot_stats} $gc_stats -p $outdir.part/ $bchk");
+
+    rename("$outdir.part",$outdir) or $self->throw("rename $outdir.part $outdir: $!");
+}
+
+sub determine_sex
+{
+    my ($self,$outfile,$bam) = @_;
+
+    my $sex  = '?';
+    my $num1 = 0;
+    my $num2 = 0;
+    if ( !defined $$self{sex} ) { goto sex_done; }
+
+    # {Y} < {22}*0.1 ? F : M
+    my $expr = $$self{sex};
+
+    if ( !($expr=~/\{([a-zA-Z0-9_.:]+)\}/) ) { $self->throw("Could not determine first region in $$self{sex}\n"); }
+    my $reg1 = $1;
+    $expr = $';
+    if ( !($expr=~/\{([a-zA-Z0-9_.:]+)\}/) ) { $self->throw("Could not determine first region in $$self{sex}\n"); }
+    my $reg2 = $1;
+
+    $self->cmd("$$self{samtools} stats $bam $reg1 > $bam.bchk.$reg1");
+    $self->cmd("$$self{samtools} stats $bam $reg2 > $bam.bchk.$reg2");
+    my $stats1 = $self->parse_bam_stats("$bam.bchk.$reg1");
+    my $stats2 = $self->parse_bam_stats("$bam.bchk.$reg2");
+    $num1 = $$stats1{mapped_reads};
+    $num2 = $$stats2{mapped_reads};
+
+    $expr = $$self{sex};
+    $expr =~ s/\{$reg1\}/$num1/;
+    $expr =~ s/\{$reg2\}/$num2/;
+    $sex  = eval $expr;
+    if ( $@ ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
+
+sex_done:
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    print $fh "$sex\t$num1\t$num2\n";
+    close($fh) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}   
+
+sub create_stats
+{
+    my ($self,$outfile,$files) = @_;
+    open(my $txt,'>',"$$self{outdir}/stats.txt") or $self->throw("$$self{outdir}/stats.txt: $!");
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    $self->write_header($fh,$txt);
+    for my $file (@$files)
+    {
+        my $stats = $self->parse_bam_stats("$$self{outdir}/$$file{prefix}.bchk");
+        my $sex   = $self->parse_sex_stats("$$self{outdir}/$$file{prefix}.sex");
+        $self->write_stats($fh,$txt,$file,{%$stats,%$sex});
+    }
+    $self->write_footer($fh);
+    close($fh) or $self->throw("close failed: $outfile.part");
+    close($txt) or $self->throw("close failed: $$self{outdir}/stats.txtt");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bignum
+{
+    my ($num) = @_;
+    if ( !defined $num ) { return ''; }
+    if ( !($num=~/^\d+$/) ) { return $num; }
+    my $len = length($num);
+    my $out;
+    for (my $i=0; $i<$len; $i++)
+    {
+        $out .= substr($num,$i,1);
+        if ( $i+1<$len && !(($len-$i-1)%3) ) { $out .= ','; }
+    }
+    return $out;
+}
+
+sub parse_sex_stats
+{
+    my ($self,$fname) = @_;
+    open(my $fh,'<',$fname) or $self->throw("$fname: $!");
+    my $line = <$fh>;
+    chomp($line);
+    my ($sex,$n22,$nY) = split(/\s+/,$line);
+    close($fh) or $self->throw("close failed: $fname");
+    return { sex=>$sex, n22=>$n22, nY=>$nY };
+}
+
+sub parse_bam_stats
+{
+    my ($self,$file) = @_;
+    my %stats = ();
+    my @insert_size_lines = ();
+    my @indel_dist_lines = ();
+    my @indel_per_cycle_lines = ();
+    open(my $fh,'<',$file) or $self->throw("$file: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/^SN/ )
+        {
+            my @items = split(/\t/,$line);
+            chomp($items[2]);
+            if ( $items[1] eq 'bases mapped (cigar):' ) { $stats{bases_mapped} = $items[2]; next; }
+            if ( $items[1] eq 'total length:' ) { $stats{bases_total} = $items[2]; next; }
+            if ( $items[1] eq 'error rate:' ) { $stats{error_rate} = $items[2]; next; }
+            if ( $items[1] eq 'sequences:' ) { $stats{sequences} = $items[2]; next; }
+            if ( $items[1] eq 'reads mapped:' ) { $stats{mapped_reads} = $items[2]; next; }
+            if ( $items[1] eq 'reads duplicated:' ) { $stats{dup_reads} = $items[2]; next; }
+            if ( $items[1] eq 'reads properly paired:' ) { $stats{paired_reads} = $items[2]; next; }
+        }
+        elsif ( $line=~/^IS/ )
+        {
+            push @insert_size_lines,$line;
+        }
+        elsif ( $line=~/^ID/ )
+        {
+            push @indel_dist_lines,$line;
+        }
+        elsif ( $line=~/^IC/ )
+        {
+            push @indel_per_cycle_lines,$line;
+        }
+        elsif ( $line=~/^RL/ && !exists($stats{readlen}) )
+        {
+            # RL  151 204900974
+            my @items = split(/\s+/,$line);
+            $stats{readlen} = $items[1];
+        }
+    }
+    close($fh) or $self->throw("close failed: $file");
+    $self->calc_insert_size_stats(\%stats,\@insert_size_lines);
+    $self->calc_indel_ratio_stats(\%stats,\@indel_dist_lines);
+    $self->calc_indel_per_cycle_stats(\%stats,\@indel_per_cycle_lines);
+    return \%stats;
+}
+sub calc_insert_size_stats
+{
+    my ($self,$stats,$lines) = @_;
+    my $seqlen = $$stats{readlen};
+    my $dup_mapped_bases = 0;
+    my $tot_mapped_bases = 0;
+    my @distx = ();
+    my @disty = ();
+    my $tot_count = 0;
+    for my $line (@$lines)
+    {
+        # IS, insert size, pairs total, inward oriented pairs, outward oriented pairs, other pairs
+        my ($is,$size,$tot,$inw,$outw,$other) = split(/\s+/,$line);
+        if ( !$tot ) { next; }
+
+        if ( $size < 2*$seqlen ) 
+        {
+            $dup_mapped_bases += $tot * (2*$seqlen - $size);
+        }
+        $tot_mapped_bases += $tot * ($seqlen * 2);
+
+        if ( defined $$self{min_inserts_within} )
+        {
+            push @distx, $size;
+            push @disty, $tot;
+            $tot_count += $tot;
+        }
+    }
+    $$stats{overlap_bases} = $tot_mapped_bases ? 100. * $dup_mapped_bases / $tot_mapped_bases : 0;
+
+    # What is the percentage of reads within the allowed range of the main insert size peak
+    # (e.g. [mpeak*(1-0.25),mpeak*(1+0.25)]). We work with the main bulk of data only, because
+    # bamcheck trims the insert size distribution and puts all remaining values in the last bin,
+    # which can easily become the maximum peak. Hence we take the maximum in the first 98% of the
+    # reads.
+    if ( $tot_count )
+    {
+        my $amount = 0;
+        my $imax   = 0;
+        for (my $i=0; $i<@distx; $i++)
+        {
+            $amount += $disty[$i];
+            if ( $amount > $tot_count*0.98 ) { last; }
+            if ( $disty[$imax] < $disty[$i] ) { $imax = $i; }
+        }
+
+        $amount = 0;
+        my $xbeg = $distx[$imax] * (1 - $$self{min_inserts_within}[1] / 100.);
+        my $xend = $distx[$imax] * (1 + $$self{min_inserts_within}[1] / 100.);
+        for (my $i=0; $i<@distx; $i++)
+        {
+            if ( $distx[$i] < $xbeg ) { next; }
+            if ( $distx[$i] > $xend ) { next; }
+            $amount += $disty[$i];
+        }
+        $$stats{inserts_within} = $amount*100./$tot_count;
+    }
+    else { $$stats{inserts_within} = 100; }
+}
+sub calc_indel_ratio_stats
+{
+    my ($self,$stats,$lines) = @_;
+    my $nins_tot = 0;
+    my $ndel_tot = 0;
+    for my $line (@$lines)
+    {
+        # ID, length, number of insertions, number of deletions
+        my ($id,$length,$nins,$ndel) = split(/\s+/,$line);
+        $nins_tot += $nins;
+        $ndel_tot += $ndel;
+    }
+    $$stats{indel_ratio} = $ndel_tot ? $nins_tot / $ndel_tot : 0;
+}
+sub calc_indel_per_cycle_stats
+{
+    my ($self,$stats,$lines) = @_;
+    my @counts = ();;
+    for my $line (@$lines)
+    {
+        # IC, cycle, number of insertions (fwd), .. (rev) , number of deletions (fwd), .. (rev)
+        my ($ic,$cycle,@per_cycle_counts) = split(/\s+/,$line);
+        for (my $i=0; $i<@per_cycle_counts; $i++)
+        {
+            push @{$counts[$i]},$per_cycle_counts[$i];
+        }
+    }
+    if ( !@counts ) 
+    { 
+        $$stats{indels_per_cycle_max} = [0,0,0,0]; 
+        $$stats{indels_per_cycle_med} = [0,0,0,0]; 
+        return; 
+    }
+
+    for (my $i=0; $i<4; $i++)
+    {
+        my @sorted = sort {$a<=>$b} @{$counts[$i]};
+        my $n   = int(0.5 * scalar @sorted);
+        $$stats{indels_per_cycle_max}[$i] = $sorted[-1];
+        $$stats{indels_per_cycle_med}[$i] = $sorted[$n];
+    }
+}
+
+sub write_header
+{
+    my ($self,$fh,$txt) = @_;
+    print $fh qq[
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>QC output</title>
+            <style>
+                th {
+                    padding-left:0.5em;
+                    cursor: pointer;
+                }
+                td {
+                    padding-left:1em;
+                    text-align:right;
+                }
+                td.name {
+                    text-align:left;
+                    padding-left:0em;
+                }
+                th.rotate {
+                    height: 140px;
+                    white-space: nowrap;
+                }
+                th.rotate > div {
+                    transform: translate(10px, 60px) rotate(315deg);
+                    width: 1em;
+                }
+                th.rotate > div > span {
+                    border-bottom: 1px solid #ccc;
+                }
+                .pass {
+                    background-color: #DFF0D8;
+                }
+                .fail {
+                    background-color: #F2DEDE;
+                }
+                tr:hover,  tr:hover > .pass {
+                    background-color: #D9EDF7 !important;
+                }
+                tr:hover > th {
+                    background-color: white;
+                }
+            </style>
+            <script type="text/javascript" src="https://code.jquery.com/jquery-latest.min.js"></script>
+            <script type="text/javascript" src="http://cdn.datatables.net/1.10.10/js/jquery.dataTables.min.js"></script>
+            <script type="text/javascript">
+                \$(document).ready(function(){
+                    \$('#table').DataTable({
+                        "paging": false,
+                        "searching": false,
+                        "info": false
+                    }); 
+                });
+            </script>
+        </head>
+        <body>
+            <table id="table"><thead>
+            <tr>
+    ];
+
+    my $within = defined $$self{min_inserts_within} ? $$self{min_inserts_within}[1] : 100;
+
+    print $fh "<th class='rotate'><div><span>File</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Sex</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Number of reads</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Error rate [%]</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Duplicate reads [%]</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Paired reads [%]</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Mapped bases [%]</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Overlap bases [%]</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Inserts within $within%</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Ins/Del ratio</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Indels per cycle</span></div>\n";
+    print $fh "</thead><tbody>";
+
+    print $txt "# ";
+    print $txt "[1]File\n";
+    print $txt "[2]Sex\t";
+    print $txt "[3]Number of reads\t";
+    print $txt "[4]Error rate [%]\t";
+    print $txt "[5]Duplicate reads [%]\t";
+    print $txt "[5]Paired reads [%]\t";
+    print $txt "[6]Mapped bases [%]\t";
+    print $txt "[7]Overlap bases [%]\t";
+    print $txt "[8]Inserts within $within%\t";
+    print $txt "[9]Ins/Del ratio\t";
+    print $txt "[10]Indels per cycle\n";
+}
+sub write_footer
+{
+    my ($self,$fh) = @_;
+    print $fh "</tbody></table></body></html>\n";
+}
+sub write_stats
+{
+    my ($self,$fh,$txt,$file,$stats) = @_;
+    my $name = $$file{prefix};
+    my $url  = "$$file{prefix}.stats/index.html";
+
+    my $mapped_bases = 100.*$$stats{bases_mapped}/$$stats{bases_total};
+    my $mapped_bases_class = '';
+    if ( $$self{min_mapped_bases} )
+    {
+        $mapped_bases_class = $mapped_bases < $$self{min_mapped_bases} ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $error_rate = 100*$$stats{error_rate};
+    my $error_rate_class = '';
+    if ( $$self{max_error_rate} )
+    {
+        $error_rate_class = $error_rate > $$self{max_error_rate} ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $overlap_bases_class = '';
+    if ( $$self{max_overlap_bases} )
+    {
+        $overlap_bases_class = $$stats{overlap_bases} > $$self{max_overlap_bases} ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $dup_reads = 100 * $$stats{dup_reads} / $$stats{mapped_reads};
+    my $dup_reads_class = '';
+    if ( $$self{max_dup_reads} )
+    {
+        $dup_reads_class = $dup_reads > $$self{max_dup_reads} ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $paired_reads = 100 * $$stats{paired_reads} / $$stats{mapped_reads};
+    my $paired_reads_class = '';
+    if ( $$self{min_paired_reads} )
+    {
+        $paired_reads_class = $paired_reads < $$self{min_paired_reads} ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $indel_ratio_class = '';
+    if ( $$self{min_indel_ratio} or $$self{max_indel_ratio} )
+    {
+        $indel_ratio_class = ( $$stats{indel_ratio} < $$self{min_indel_ratio} or $$stats{indel_ratio} > $$self{max_indel_ratio} ) ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $indel_per_cycle_class = '';
+    my $indel_per_cycle = 0;
+    if ( $$self{max_indel_per_cycle} )
+    {
+        my $fail = 0;
+        for (my $i=0; $i<4; $i++)
+        {
+            if ( $$stats{indels_per_cycle_max}[$i] > $$stats{indels_per_cycle_med}[$i] * $$self{max_indel_per_cycle} ) { $fail = 1; }
+            if ( $$stats{indels_per_cycle_med}[$i] && $indel_per_cycle < $$stats{indels_per_cycle_max}[$i]/$$stats{indels_per_cycle_med}[$i] )
+            {
+                $indel_per_cycle = $$stats{indels_per_cycle_max}[$i]/$$stats{indels_per_cycle_med}[$i];
+            }
+        }
+        $indel_per_cycle_class = $fail ? 'class="fail"' : 'class="pass"';
+    }
+
+    my $inserts_within_class = '';
+    if ( defined $$self{min_inserts_within} )
+    {
+        $inserts_within_class = $$stats{inserts_within} < $$self{min_inserts_within}[0] ? 'class="fail"' : 'class="pass"';
+    }
+
+    print  $fh qq[<tr>\n];
+    print  $fh qq[<td class="name"><a href="$url">$name</a>\n];
+    printf $fh qq[<td>%s\n], $$stats{sex};
+    printf $fh qq[<td>%s\n], bignum($$stats{sequences});
+    printf $fh qq[<td $error_rate_class>%.2f\n], $error_rate;
+    printf $fh qq[<td $dup_reads_class>%.2f\n], $dup_reads;
+    printf $fh qq[<td $paired_reads_class>%.2f\n], $paired_reads;
+    printf $fh qq[<td $mapped_bases_class>%.1f\n], $mapped_bases;
+    printf $fh qq[<td $overlap_bases_class>%.2f\n], $$stats{overlap_bases};
+    printf $fh qq[<td $inserts_within_class>%.2f\n], $$stats{inserts_within};
+    printf $fh qq[<td $indel_ratio_class>%.2f\n], $$stats{indel_ratio};
+    printf $fh qq[<td $indel_per_cycle_class>%.1f\n], $indel_per_cycle;
+    print  $fh qq[</tr>\n];
+
+    print  $txt "$name\t";
+    printf $txt "%s\t", $$stats{sex};
+    printf $txt "%s\t", $$stats{sequences};
+    printf $txt "%.2f\t", $error_rate;
+    printf $txt "%.2f\t", $dup_reads;
+    printf $txt "%.2f\t", $paired_reads;
+    printf $txt "%.1f\t", $mapped_bases;
+    printf $txt "%.2f\t", $$stats{overlap_bases};
+    printf $txt "%.2f\t", $$stats{inserts_within};
+    printf $txt "%.2f\t", $$stats{indel_ratio};
+    printf $txt "%.1f\n", $indel_per_cycle;
+}
+
+
+#   # minimum percentage of reads (80%) within 25% of the main insert peak
+#   min_inserts_within      => [80,25],
+
+
