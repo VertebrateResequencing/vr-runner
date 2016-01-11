@@ -250,8 +250,10 @@ sub run
 
     $self->create_lock();
 
-    if ( $$self{_reset_step} )
+    if ( exists($$self{_reset_step}) )
     {
+        if ( !defined $$self{_reset_step} ) { $self->throw("Expected argument with +reset\n"); }
+        if ( !-e $$self{_reset_step} ) { $self->throw("No such file: $$self{_reset_step}\n"); }
         $self->_init_scheduler;
         $$self{_js}->reset_step($$self{_reset_step});
         $self->remove_lock();
