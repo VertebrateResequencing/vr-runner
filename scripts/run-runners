@@ -10,6 +10,7 @@ use warnings;
 use Carp;
 use Cwd;
 use IPC::Run3;
+use POSIX;
 
 my $opts = parse_params();
 
@@ -21,6 +22,8 @@ while (1)
     {
         run_project($opts,$project);
     }
+    update_html_report($opts,$projects);
+
     if ( !$$opts{loop} ) { last; }
     print STDERR "sleeping $$opts{loop} seconds..\n" unless !$$opts{verbose};
     sleep($$opts{loop});
@@ -77,6 +80,7 @@ sub parse_params
     $$opts{dropbox_in}   = "$$opts{dropbox}.in";
     $$opts{dropbox_out}  = "$$opts{dropbox}.out";
     $$opts{dropbox_conf} = "$$opts{dropbox}.conf";
+    $$opts{dropbox_html} = "$$opts{dropbox}.html";
 
     if ( !-d $$opts{dropbox_conf} ) { error("Incorrect dropbox prefix, the directory not found: $$opts{dropbox_conf}\n\n"); }
     if ( !-e $$opts{dropbox_in} ) { `mkdir -p $$opts{dropbox_in}`; }
@@ -116,52 +120,62 @@ sub detailed_usage
  written, the user only needs to create a small project description and place it
  in the dropbox input directory:
 
-    config:          chain.gtcheck.conf
-    email:           someone\@somewhere.org
+    .config:         chain.gtcheck.conf
+    .email:          someone\@somewhere.org
     mpileup/alns:    bams.list
     mpileup/fa_ref:  human_g1k_v37.fasta
 
+ The project descriptions are small text files which define the input data.
+ All keys prefixed with a dot are specific to the project, the rest are config
+ keys specific to one or multiple steps:
 
- The project descriptions are small text files which define the input data:
- 
    # The pipeline config, known also as the "chain file". Note that in order to
    # avoid the execution of an arbitrary code passed by a malicious user, the config
    # must be a file name with any leading directory components removed. The file
    # must exist in the dropbox config directory:
-   config: chain.pipeline.conf
+   .config: chain.pipeline.conf
  
    # The rest is optional and pipeline-specific. There are a few pipeline-wide 
    # options that are recognised by all pipelines, such as where to send email 
    # notifications about job completion and failures:
-   email: someone\@somewhere.org
+   .email: someone\@somewhere.org someone.else\@somewhere.else.org
  
    # Frequency (in minutes) with which to remind about failed jobs, so that
    # the mailbox does not end up cluttered by emails. If not given, the default
    # of 60 minutes is used:
-   err_period: 60
+   .err_period: 60
  
    # Any key in a runner's config file can be overriden. For example, if a pipeline
    # chain includes a runner step named "step_name" which recognises the config 
    # key "var_name", the default key can be overriden as:
    step_name/var_name: new value
- 
-   # Similarly, substrings in a runner's config file can be expanded. For example,
+
+   # If multiple steps share the same config key, a comma-separated list of
+   # steps can be given or leave out the step name to set the key in all steps:
+   step1,step2/var_name: new value
+   var_name: new value
+
+   # Also substrings in a runner's config file can be expanded. For example,
    # if the config contains the following key-value pair
    #   key => 'some \$(value)',
    # the variable "\$(value)" can be replaced with "new value":
    step_name/value: new value
  
    # Note: if the project description does not specify the "step_name/value" key,
-   # the variable "\$(value)" will be replaced with "value".
+   # the variable "\$(value)" will be replaced with empty string.
  
    # In order to preserve compactness of project descriptions yet allowing flexibility,
    # the runner's config files can use default values. For example, if the config
    # contains the following key-value pair
-   #   key => 'some \$(value:sensible default)',
+   #    step_name/key => 'some \$(value:sensible default)',
    # the project description file can override the value but in case it does not,
    # the key will be expanded as follows
-   #   key => 'some sensible default',
-   #
+   #    step_name/key => 'some sensible default',
+ 
+   # To undefine a pre-defined key, pass "undef"
+   step/key: undef      # undefine a key
+   step/key: 'undef'    # pass string "undef"
+   
    # See the misc/*conf files for real-life examples.
  
  
@@ -233,6 +247,284 @@ sub remove_lock
     if ( -e $lock ) { unlink($lock); }
 }
 
+sub read_file_hash
+{
+    my ($fname) = @_;
+    open(my $fh,'<',$fname) or return ();
+    my %out = ();
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        if ( $line=~/^\s*(\S+):\s+/ ) { $out{$1} = $'; }
+    }
+    close($fh);
+    return %out;
+}
+sub elapsed_time
+{
+    my ($time) = @_;
+    my $hours = int($time/3600.); $time -= $hours*3600;
+    my $mins  = int($time/60.); $time -= $mins*60;
+    return sprintf("%2d:%02d",$hours,$mins);
+}
+
+sub update_html_report
+{
+    my ($opts,$projects) = @_;
+
+    push @$projects, list_finished_projects($opts);
+    my %chains = ();
+    for my $project (@$projects)
+    {
+        push @{$chains{$$project{config}}}, $project;
+    }
+
+    open(my $fh,'>',$$opts{dropbox_html}) or error("Failed to create html report $$opts{dropbox_html}: $!");
+    print $fh qq[<!DOCTYPE html><html>
+        <head>
+            <title>Runner dropbox $$opts{dropbox}</title>
+            <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+            <link rel="stylesheet" href="http://maxcdn.bootstrapcdn.com/bootstrap/latest/css/bootstrap.min.css">
+            <script src="https://code.jquery.com/jquery-latest.min.js" type="text/javascript"></script>
+            <style>
+                .glyphicon { font-size:1.1em;}
+                .material-icons{vertical-align:-14%}
+                body { text-align:center;}
+                .content { display:inline-block; text-align:left; }
+                a { text-decoration: none;}
+                a:link { color: #2E6DA4; }
+                a:visited { color: #2E6DA4; }
+                a:focus { color: #2E6DA4; }
+                a:hover { color: green; }
+                a:active { color: red; }
+                /*
+                h1,h2,h3,h4,h5,h6 {
+                    margin: 0 0 .5em;
+                    font-weight: 500;
+                    line-height: 1.1;
+                }
+                */
+                table {
+                    background-color: transparent;
+                    border-spacing: 0;
+                    border-collapse: collapse;
+                    /* border-top: 1px solid #ddd; */
+                    /* border-bottom: 1px solid #ddd; */
+                    margin: 1em;
+                }
+                th, td {
+                    padding: 0.3em 0.7em 0.3em 0.7em;
+                }
+                th {
+                    border-bottom: 1px solid #2E6DA4;
+                    text-align: left;
+                    vertical-align: bottom;
+                }
+                .rotate  {
+                    display: inline-block;
+                    overflow: hidden;
+                    width: 1.5em;
+                    line-height: 1.5;
+                }
+                .rotate-inner {
+                    display: inline-block;
+                    white-space: nowrap;
+                    transform-origin: 0 0;
+                    transform: translate(0%, 100%) rotate(-90deg);
+                }
+                .rotate-inner:after {
+                    content: "";
+                    float: left; 
+                    margin-top: 100%;
+                }
+                .chain {
+                    border: black solid 1px;
+                    border-radius: .4em;
+                    margin-top: 2em;
+                }
+                .chain-name {
+                    background-color: #337ab7;
+                    border-color: #2E6DA4;
+                    border-radius: .3em;
+                    color: white;
+                    padding: 0.3em 0.6em 0.3em 0.6em;
+                    margin-left: 0.6em;
+                }
+                .prj-detail {
+                    display: none;
+                    position: absolute;
+                    background-color: #fafafa;
+                    border: #ccc solid 1px;
+                    border-radius: .4em;
+                    padding: 0em;
+                    z-index:100;
+                }
+                .prj-detail table {
+                    margin-top:0.5em;
+                }
+                span.status-btn {
+                    width: 1.1em;
+                    height: 1.1em;
+                    margin-right: 0.3em;
+                    margin-left: 0.3em;
+                    border-radius: 3px;
+                    display: inline-block;
+                }
+                span.status-done { background-color: #5cb85c; }
+                span.status-error { background-color: #d9534f; }
+                span.status-running { background-color: #f0ad4e; }
+                span.status-todo { background-color: #ccc; }
+            </style>
+        </head>
+        <body>
+        <div class="content">
+
+        <h3 style='margin-bottom:0px;'>Runner jobs</h3>
+        in <a href=".">$$opts{dropbox}</a>
+    ];
+
+    my $rel_dbox = $$opts{dropbox};
+    $rel_dbox =~ s{^.*/}{};
+
+    my $div_id = 0;
+    for my $chain (sort keys %chains)
+    {
+        my @steps = @{$chains{$chain}[0]{steps}};
+
+        my $name = $chain=~/^chain\.(.+)\.conf$/ ? $1 : $chain;
+        print $fh "<div class='chain'><span class='chain-name'>$name</span><table>\n";
+        print $fh "<tr>\n";
+        print $fh "<th>Project\n";
+        print $fh "<th>User\n";
+        print $fh "<th><div class='rotate'><div class='rotate-inner'>".join("</div></div><th><div class='rotate'><div class='rotate-inner'>",@steps)."</div></div>";
+
+        for my $project (sort {$$a{run_id} cmp $$b{run_id}} @{$chains{$chain}})
+        {
+            my $started = '';
+            if ( $$project{run_id} =~ /^(\d+)/ ) { $started = strftime("%F %H:%M",gmtime($1)); }
+
+            my $abs_dir = "$$opts{dropbox}.tmp/$$project{run_id}";
+            my $rel_dir = "$rel_dbox.tmp/$$project{run_id}";
+            my $prj_dir = "$rel_dbox.tmp/$$project{run_id}";
+            if ( $$project{finished} )
+            {
+                $abs_dir = $$project{tmpdir};
+                $rel_dir = $abs_dir;
+                $rel_dir =~ s{^$$opts{dropbox}}{$rel_dbox};
+                $prj_dir = $$project{dir};
+                $prj_dir =~ s{^$$opts{dropbox}}{$rel_dbox}; 
+            }
+
+            my $is_error = (-e "$abs_dir/$$project{name}.err") ? 1 : 0;
+            my @steps_brief  = ();
+            my @steps_detail = ();
+            my $prev_done = 1;
+            my $tot_time;
+            for my $step (@{$$project{steps}})
+            {
+                my $url = '';
+                my $class = '';
+                my $elapsed = '';
+                if ( -e "$abs_dir/$$project{name}.$step.done" )
+                {
+                    my %info = read_file_hash("$abs_dir/$$project{name}.$step.done");
+                    if ( $info{started} && $info{finished} ) 
+                    { 
+                        $elapsed = elapsed_time($info{finished} - $info{started});
+                        $tot_time += $info{finished} - $info{started};
+                    }
+                    $class='status-done'; 
+                    if ( -e "$abs_dir/$$project{name}.$step.conf" ) { $url = "$rel_dir/$$project{name}.$step.conf"; }
+                }
+                elsif ( !-e "$abs_dir/$$project{name}.$step" )  { $class='status-todo'; }
+                elsif ( $prev_done )
+                {
+                    if ( $is_error )
+                    {
+                        $class = 'status-error';
+                        $url = "$rel_dir/$$project{name}.log";
+                    }
+                    else
+                    {
+                        $class = 'status-running'; 
+                        if ( -e "$abs_dir/$$project{name}.$step.conf" ) { $url = "$rel_dir/$$project{name}.$step.conf"; }
+
+                        my %info = read_file_hash("$abs_dir/$$project{name}.$step.done.part");
+                        if ( $info{started} )
+                        {
+                            $info{finished} = time();
+                            $elapsed = elapsed_time($info{finished} - $info{started}) . '+';
+                            $tot_time += $info{finished} - $info{started};
+                        }
+                    }
+                    $prev_done = 0;
+                }
+
+                my $url_beg = '';
+                my $url_end = '';
+                if ( $url ) { $url_beg = "<a href='$url'>"; $url_end = '</a>'; }
+                push @steps_brief,"<td style='text-align:center;'>$url_beg<span class='status-btn $class'></span>$url_end\n";
+                push @steps_detail,qq[<tr>
+                        <td><span class='status-btn $class'></span>
+                        <td>$url_beg$step$url_end
+                        <td>$elapsed
+                    ];
+            }
+
+            $tot_time = $tot_time ? elapsed_time($tot_time) : '';
+            print $fh "<tr>";
+            print $fh qq[
+                <td><a style="cursor:pointer;" onclick="\$('#c$div_id').toggle()">$$project{name}</a>
+                    <div class='prj-detail' id='c$div_id'>
+                    <table>
+                        <tr><td style='text-align:center;'>
+                                <span class='glyphicon glyphicon-remove' style='cursor:pointer' onclick="\$('#c$div_id').toggle()"></span>
+                            <td colspan='2' style='text-align:right;'>
+                                <a class='glyphicon glyphicon-info-sign' href='$rel_dir/$$project{name}'></a>
+                                <a class='glyphicon glyphicon-home' href='$prj_dir' style='padding-left:1em;'></a>
+                        <tr><th><th>Config<th>Time
+                    ] .join("\n",@steps_detail). qq[
+                        <tr><td><td><td>$tot_time
+                        </table>
+                    </div>
+            ];
+            $div_id++;
+            print $fh "<td>$$project{email}";
+            for my $step (@steps_brief) { print $fh $step; }
+
+        }
+        print $fh "</table>\n";
+        print $fh "</div>\n";
+    }
+
+    print $fh q[
+        </div>
+        </body></html>];
+    close($fh) or error("Failed to close html report $$opts{dropbox_html}");
+}
+
+sub list_finished_projects
+{
+    my ($opts) = @_;
+    my @projects = ();
+    opendir(my $dh,$$opts{dropbox_out}) or error("$$opts{dropbox_out}: $!");
+    while (my $dir = readdir($dh))
+    {
+        if ( !-d "$$opts{dropbox_out}/$dir" or !($dir=~/^(\d+)_(.*)$/ ) ) { next; }
+        my $run_id = $1;
+        my $name   = $2;
+        my $tmpdir = "$$opts{dropbox_out}/$dir/tmp-data/$dir";
+        my $project = parse_project($opts,$tmpdir,$name,$run_id);
+        if ( !defined $project ) { next; }
+        $$project{finished} = 1;
+        $$project{tmpdir} = $tmpdir;
+        $$project{dir} = "$$opts{dropbox_out}/$dir";
+        push @projects, $project;
+    }
+    close($dh);
+    return @projects;
+}
+
 sub list_projects
 {
     my ($opts) = @_;
@@ -291,30 +583,31 @@ sub clean_project
     debug_msg($opts,"Cleaning project: $name\n");
     $$project{prefix} = "$$opts{dropbox_tmp}/$$project{run_id}/$name";
 
-    for my $outdir (keys %{$$project{outputs}})
+    for my $dst (keys %{$$project{outputs}})
     {
-        if ( ref($$project{outputs}{$outdir}) eq 'ARRAY' )
+        # Create a subdirectory '$dst' and move all listed files in there:
+        #   dst => [ 'src1','src2' ]
+        #
+        # Move src file in dst
+        #   dst => 'src',
+        #
+        if ( ref($$project{outputs}{$dst}) eq 'ARRAY' )
         {
-            # create a subdirectory '$outdir' and copy all listed files in there
-            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/$outdir");
-            for my $file (@{$$project{outputs}{$outdir}})
+            cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/$dst");
+            for my $file (@{$$project{outputs}{$dst}})
             {
-                my $path = expand_vars($opts,$project,$file);
-                cmd($opts,"mv $path $$opts{dropbox_out}/$$project{run_id}/$outdir/");
+                my $src = expand_vars($opts,$project,$file);
+                cmd($opts,"mv $src $$opts{dropbox_out}/$$project{run_id}/$dst/");
             }
         }
         else
         {
             my $dir = "$$opts{dropbox_out}/$$project{run_id}";
-            my $dst = "$$opts{dropbox_out}/$$project{run_id}";
-            if ( defined($$project{outputs}{$outdir}) )
-            {
-                $dst = $$project{outputs}{$outdir};
-                if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
-            }
+            my $src = $$project{outputs}{$dst};
+            if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
             cmd($opts,"mkdir -p $dir");
-            my $path = expand_vars($opts,$project,$outdir);
-            cmd($opts,"mv $path $dst");
+            $src = expand_vars($opts,$project,$src);
+            cmd($opts,"mv $src $dst");
         }
     }
 
@@ -326,8 +619,8 @@ sub clean_project
 sub parse_project
 {
     my ($opts,$dir,$name,$run_id) = @_;
-    my %project = ();
-    my @override = ();
+    my %project  = ();
+    my %override = ();
 
     # the error period can be overriden by projects, set the default here
     $project{err_period} = $$opts{err_period};
@@ -353,12 +646,26 @@ sub parse_project
         $value =~ s/\s*$//;
         $value = parse_config_value($value);    # expand deep variables (arrays or hashes)
         $key   =~ s/\s*$//;
-        if ( $key =~ m{/} )
+
+        if ( $key =~ /^\./ )
         {
-            push @override, [$key,$value];      # user variable can override a default config key
+            $key = $';
+            $project{$key} = $value;
             next;
         }
-        $project{$key} = $value;
+
+        # User variable can override a default chain or step config key.
+        # Determine the step which this config key belongs to.
+        if ( $key =~ m{/} )
+        {
+            my $step  = $`;
+            my $key   = $';
+            my @steps = ($step=~/,/) ? split(/\s*,\s*/,$step) : ($step);
+            for my $step (@steps) { $override{"$step/$key"} = $value; }
+            next;
+        }
+
+        $override{"*/$key"} = $value;
     }
     close($fh) or error("close failed: $file");
     $project{name}   = $name;
@@ -395,7 +702,7 @@ sub parse_project
 
 
     # Parse the chain file, include all steps, expand variables
-    $x = parse_config($opts,$config_fname,\@override,\%project,$x);
+    $x = parse_config($opts,$config_fname,\%override,\%project,$x);
     %project = (%project, %$x);
     if ( !@{$project{steps}} ) { error("No steps defined in the pipeline: $config_fname\n\n"); }
 
@@ -410,12 +717,24 @@ sub parse_config_value
         my $val = eval "$value";
         if ( !$@ ) { $value = $val; }
     }
+    elsif ( $value eq 'undef' ) { $value = undef; }
+    elsif ( $value eq "'undef'" or $value eq '"undef"' ) { $value = 'undef'; }
     return $value;
 }
 
 sub parse_config
 {
     my ($opts,$fname,$override,$project,$config) = @_;
+
+    # expand steps keys shared by all steps (i.e. "*/key: value")
+    for my $var (keys %$override)
+    {
+        my ($step,$key) = split(m{/},$var);
+        if ( $step ne '*' ) { next; }
+        my $value = $$override{$var};
+        delete($$override{$var});
+        for my $step (@{$$config{steps}}) { $$override{"$step/$key"} = $value; }
+    }
 
     # Include all steps, expand variables
     for my $step (@{$$config{steps}})
@@ -429,8 +748,11 @@ sub parse_config
             if ( $key ne 'include' ) 
             {
                 my $value = $$config{$step}{$key};
-                $value = expand_vars($project,$project,$value);
-                push @$override, ["$step/$key",$value]; 
+                if ( defined $value )   # propagate "key=>undef" to step config
+                {
+                    $value = expand_vars($project,$project,$value);
+                }
+                if ( !exists($$override{"$step/$key"}) ) { $$override{"$step/$key"} = $value; }
                 next; 
             }
 
@@ -444,10 +766,10 @@ sub parse_config
             $$config{$step} = {(%{$$config{$step}},%$x)};
         }
     }
-    for my $var (@$override)
+    for my $var (keys %$override)
     {
-        my ($step,$key) = split(m{/},$$var[0]);
-        my $value = $$var[1];
+        my ($step,$key) = split(m{/},$var);
+        my $value = $$override{$var};
         if ( exists($$config{$step}{config}) )
         {
             # The step has a config (i.e. a runner). In this case we create
@@ -467,7 +789,7 @@ sub parse_config
             my @config_lines = split(/\n/,Dumper($$config{$step}{config}));
             shift(@config_lines);       # get rid of $VAR1 = { .. } lines
             pop(@config_lines);
-            $$config{$step}{config} = join("\n",@config_lines);
+            $$config{$step}{config} = join("\n",@config_lines)."\n";
         }
     }
     return $config;
@@ -535,7 +857,13 @@ sub run_project
             debug_msg($opts, "step done: $prefix.$step\n");
             next; 
         }
-        if ( ! -e $prefix ) { system("mkdir -p $prefix.$step"); }
+        if ( ! -e "$prefix.$step" ) 
+        { 
+            open(my $fh,'>',"$prefix.$step.done.part") or error("$prefix.$step.done.part: $!");
+            print $fh "started:\t".time()."\n";
+            close($fh) or error("close failed: $prefix.$step.done.part");
+            system("mkdir -p $prefix.$step"); 
+        }
         $$project{step} = $step;
 
         if ( exists($$project{$step}{config}) && !-e "$prefix.$step.conf" )
@@ -558,8 +886,10 @@ sub run_project
         if ( defined $cwd ) { chdir($cwd); }
         if ( !$ret ) { return; }
 
-        system("touch $prefix.$step.done");
-        if ( $? ) { confess "touch $prefix.$step.done"; }
+        open(my $fh,'>>',"$prefix.$step.done.part") or error("$prefix.$step.done.part: $!");
+        print $fh "finished:\t".time()."\n";
+        close($fh) or error("close failed: $prefix.$step.done.part");
+        rename("$prefix.$step.done.part","$prefix.$step.done") or error("rename $prefix.$step.done.part $prefix.$step.done: $!");
     }
     clean_project($opts,$project);
     send_email($project,"The project \"$name\" finished","The project \"$name\" finished:\n\t$$opts{dropbox_out}/$$project{run_id}");
