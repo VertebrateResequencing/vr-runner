@@ -42,6 +42,7 @@ sub error
         "About: Maintain a dropbox-style runner chains.\n",
         "Usage: run-runners [OPTIONS]\n",
         "Options:\n",
+        "   -a, --admin <email>       admin email address\n",
         "   -e, --err-period <int>    wait <int> minutes before sending more emails about failing jobs\n",
         "   -d, --dropbox <prefix>    prefix to dropbox directory (read \"run-runners --usage\" first!)\n",
         "   -i, --ignore-failures     continue with other projects even if one keeps failing\n",
@@ -64,6 +65,7 @@ sub parse_params
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-u' || $arg eq '--usage' ) { detailed_usage(); exit; }
+        if ( $arg eq '-a' || $arg eq '--admin' ) { $$opts{admin_email}=shift(@ARGV); next }
         if ( $arg eq '-d' || $arg eq '--dropbox' ) { $$opts{dropbox}=shift(@ARGV); next }
         if ( $arg eq '-e' || $arg eq '--err-period' ) { $$opts{err_period}=shift(@ARGV); next }
         if ( $arg eq '-i' || $arg eq '--ignore-failures' ) { $$opts{ignore_failures}=1; next }
@@ -566,7 +568,21 @@ sub list_projects
 
         system("mkdir -p $$opts{dropbox_tmp}/$$project{run_id}");
         system("mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name");
-        if ( $? ) { confess "mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name"; }
+        if ( $? ) 
+        { 
+            # cannot move because of permissions, skip
+            print STDERR "mv $$opts{dropbox_in}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name"; 
+            ulink("$$opts{dropbox_tmp}/$$project{run_id}/$name");
+            next;
+        }
+        if ( exists($$project{chgrp}) )
+        {
+            # set group permissions
+            system("cp $$opts{dropbox_tmp}/$$project{run_id}/$name $$opts{dropbox_tmp}/$$project{run_id}/$name.part");
+            system("chmod g+w $$opts{dropbox_tmp}/$$project{run_id}/$name.part");
+            system("mv -f $$opts{dropbox_tmp}/$$project{run_id}/$name.part $$opts{dropbox_tmp}/$$project{run_id}/$name");
+            system("chgrp -R $$project{chgrp} $$opts{dropbox_tmp}/$$project{run_id}"); 
+        }
 
         push @projects, $project;
         if ( exists($$opts{nmax_projects}) && scalar @projects >= $$opts{nmax_projects} ) { last; }
@@ -594,6 +610,7 @@ sub clean_project
         if ( ref($$project{outputs}{$dst}) eq 'ARRAY' )
         {
             cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/$dst");
+            if ( exists($$project{chgrp}) ) { system("chgrp -R $$project{chgrp} $$opts{dropbox_out}/$$project{run_id}"); }
             for my $file (@{$$project{outputs}{$dst}})
             {
                 my $src = expand_vars($opts,$project,$file);
@@ -606,6 +623,7 @@ sub clean_project
             my $src = $$project{outputs}{$dst};
             if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
             cmd($opts,"mkdir -p $dir");
+            if ( exists($$project{chgrp}) ) { system("chgrp $$project{chgrp} $dir"); }
             $src = expand_vars($opts,$project,$src);
             cmd($opts,"mv $src $dst");
         }
@@ -671,6 +689,11 @@ sub parse_project
     $project{name}   = $name;
     $project{run_id} = $run_id;
     $project{prefix} = $project{chdir_into_project} ? $name : "$$opts{dropbox_tmp}/$run_id/$name";
+
+    my %email = ();
+    if ( exists($project{email}) ) { %email = map { $_=>1 } split(/\s+/,$project{email}); }
+    if ( exists($$opts{admin_email}) ) { $email{$$opts{admin_email}} = 1; }
+    if ( scalar keys %email ) { $project{email} = join(' ',keys %email); }
 
     # Read the chain file
     if ( !exists($project{config}) )
@@ -800,8 +823,9 @@ sub expand_vars
 {
     my ($opts,$project,$str) = @_;
     pos($str) = 0;
-    while ( ($str =~ /\G(.*?)\$\(([^\)]+):([^\)]*)\)/s) )
+    while ( ($str =~ /\G(.*?)\$\(([^:\)]+):([^\)]*)\)/s) )
     {
+        if ( !defined pos($str) ) { pos($str) = 0; }
         pos($str) += length($&);
         if ( exists($$project{$2}) ) 
         { 
@@ -816,6 +840,7 @@ sub expand_vars
     pos($str) = 0;
     while ( ($str =~ /\G(.*?)\$\(([^\)]+)\)/s) )
     {
+        if ( !defined pos($str) ) { pos($str) = 0; }
         pos($str) += length($&);
         if ( exists($$project{$2}) ) 
         { 
