@@ -47,8 +47,8 @@ sub new
         COMPLETED    => $$self{Done},
     };
 
-    $$self{limits}{max_jobs} = $self->_ncpu();
-    $$self{default_limits} = { memory=>500 };
+    $$self{default_limits} = { memory=>500, runtime=>60 };
+    $$self{limits} = { %{$$self{default_limits}} };
 
     return $self;
 }
@@ -81,7 +81,7 @@ sub init_jobs
     if ( ! -e $jids_file ) 
     { 
         my @jobs_out = ();
-        for my $id (@$ids) { push @jobs_out, {status=>$$self{Unknown}, nfailures=>0, memlimit=>0}; }
+        for my $id (@$ids) { push @jobs_out, {status=>$$self{Unknown}, nfailures=>0, memlimit=>0, runtime=>0}; }
         return \@jobs_out; 
     }
 
@@ -117,10 +117,40 @@ sub _parse_mem
     }
     return $mem;
 }
+sub _parse_elapsed
+{
+    my ($self,$elapsed) = @_;
+
+    # min
+    # min:sec
+    # hour:min:sec
+    # day-hour
+    # day-hour:min
+    # day-hour:min:sec
+
+    my @vals = split(/:/,$elapsed);
+    if ( @vals==3 or (@vals==2 && !($vals[0]=~/-/)) ) { pop @vals; }  # ignore seconds
+
+    # min
+    # hour:min
+    # day-hour
+    # day-hour:min
+    if ( $vals[0]=~/-/ )
+    {
+        my ($day,$hour) = split(/-/,$vals[0]); 
+        $vals[0] = $day*24 + $hour;
+    }
+
+    # min
+    # hour:min
+    if ( @vals==2 ) { $vals[1] += 60*$vals[0]; shift(@vals); }
+
+    return $vals[0];
+}
 sub _sacct_status
 {
     my ($self,$job_name,$id,$job_id) = @_;      # runner id (array index) and slurm id
-    my $cmd = qq[sacct -n -j $job_id.batch -o state,reqmem,maxrss];
+    my $cmd = qq[sacct -n -j $job_id.batch -o state,maxvmsize,elapsed];
     #print STDERR "$cmd\n";
     my @out = ();
     for (my $i=3; $i<15; $i++)
@@ -145,9 +175,9 @@ sub _sacct_status
     chomp($line);
     $line =~ s/^\s*//;
     $line =~ s/\s*$//;
-    my ($state,$reqmem,$maxmem) = split(/\s+/,$line);
-    $reqmem = $self->_parse_mem($reqmem);
-    $maxmem = $self->_parse_mem($maxmem);
+    my ($state,$maxmem,$elapsed) = split(/\s+/,$line);
+    $maxmem  = $self->_parse_mem($maxmem);
+    $elapsed = $self->_parse_elapsed($elapsed);
     my $memlimit = $maxmem;
 
     if ( $state eq 'FAILED' )
@@ -157,19 +187,20 @@ sub _sacct_status
         #   "slurmstepd: Exceeded step memory limit at some point. Step may have been partially swapped out to disk."
         # In some versions even the error message may not be printed.
 
-        $memlimit = ( $state eq 'FAILED' && $maxmem > $reqmem ) ? -$maxmem : $maxmem;
-
-        if ( $maxmem < $reqmem*1.1 && open(my $fh,'<',"$job_name.$id.e") )
+        if ( open(my $fh,'<',"$job_name.$id.e") )
         {
             # slurmstepd: Exceeded step memory limit at some point. Step may have been partially swapped out to disk.
+            # slurmstepd: *** JOB 915517 CANCELLED AT 2016-01-12T21:52:10 DUE TO TIME LIMIT ***
             while (my $line=<$fh>)
             {
-                if ( $line=~/^slurmstepd: Exceeded step memory limit/ ) { $memlimit = -$reqmem; last; }
+                if ( $line=~/^slurmstepd: Exceeded step memory limit/ ) { $memlimit = -$maxmem; }
+                if ( $line=~/^slurmstepd:/ && $line=~/DUE TO TIME LIMIT/i ) { $elapsed = -$elapsed; }
             }
             close($fh);
         }
+        if ( $memlimit < 0 ) { $memlimit *= 1.1; }
     }
-    return ($state,$memlimit);
+    return ($state,$memlimit,$elapsed);
 }
 
 # find out the job's status and slurm job id - only the array index
@@ -203,6 +234,7 @@ sub _update_job_status
 
     my $status   = undef;
     my $memlimit = undef;
+    my $runtime  = undef;
     my $dirty = 0;
 
     # If it's not already known, find out the job id
@@ -242,11 +274,11 @@ sub _update_job_status
     }
     if ( !exists($$self{cached_squeue}{$array_id}{$id}) or $$self{slurm_status}{$status} eq $$self{Error} )
     {
-        ($status,$memlimit) = $self->_sacct_status($job_name,$id,$$job{job_id});
+        ($status,$memlimit,$runtime) = $self->_sacct_status($job_name,$id,$$job{job_id});
         if ( !defined $status ) 
         {
             # No info from sacct, treat as running
-            print "No status from `sacct -n -j $$job{job_id}.batch -o state,reqmem,maxrss`, $job_name.$id.status.$array_id.*\n";
+            print "No status from `sacct -n -j $$job{job_id}.batch -o state,maxvmsize,elapsed`, $job_name.$id.status.$array_id.*\n";
             return $dirty;
         }
     }
@@ -263,6 +295,7 @@ sub _update_job_status
     {
         $$jobs{Error}{$id} = $$jobs{Running}{$id};
         $$jobs{Error}{$id}{memlimit} = $memlimit;
+        $$jobs{Error}{$id}{runtime}  = $runtime;
         $$jobs{Error}{$id}{nfailures}++;
         delete($$jobs{Running}{$id});
         $dirty = 1;
@@ -324,6 +357,11 @@ sub past_limits
     {
         $out{memory} = abs($$task{memlimit});
         if ( $$task{memlimit}<0 ) { $out{MEMLIMIT} = abs($$task{memlimit}); }
+    }
+    if ( exists($$task{runtime}) )
+    {
+        $out{runtime} = abs($$task{runtime});
+        if ( $$task{runtime}<0 ) { $out{TIMELIMIT} = abs($$task{runtime}); }
     }
     return %out;
 }
@@ -424,20 +462,43 @@ sub run_jobs
     close($fh) or $self->throw("close failed: $cmd_file");
     chmod(0755,$cmd_file);
 
+    my $runtime = 0;
+    for my $id (@$ids)
+    {
+        if ( exists($$jobs{all}{$id}) && $runtime < abs($$jobs{all}{$id}{runtime}) )  
+        { 
+            $runtime = abs($$jobs{all}{$id}{runtime}); 
+            if ( $$jobs{all}{$id}{runtime} < 0 ) { $runtime *= 2; }
+        }
+    }
+
     my @ids = @$ids;
     while ( @ids )
     {
         my $bsub_ids = $self->_create_bsub_ids_string($job_name,\@ids);
         my $used_ids = _parse_bsub_ids_string($bsub_ids);
-        my $mem = $$self{limits}{memory} ? int($$self{limits}{memory}) : $$self{default_limits}{memory};
-        my $bsub_cmd = qq[sbatch --parsable --mem-per-cpu=$mem --array='$bsub_ids' -e $job_name.\%a.e -o $job_name.\%a.o $cmd_file];
+
+        my $mem = 0;
+        if ( $$self{limits}{memory} ) { $mem = int($$self{limits}{memory}); }
+        elsif ( $$self{default_limits}{memory} ) { $mem = int($$self{defaults_limits}{memory}); }
+        my $memory = $mem ? "--mem-per-cpu=$mem" : '';
+
+        # my $mem_per_node = '';
+        # if ( $$self{limits}{memory_per_node} ) { $mem_per_node = '--mem='.int($$self{limits}{memory_per_node}); }
+        # elsif ( $$self{default_limits}{memory_per_node} ) { $mem_per_node = '--mem='.int($$self{defaults_limits}{memory_per_node}); }
+
+        if ( $runtime < $$self{limits}{runtime} ) { $runtime = $$self{limits}{runtime}; }
+        if ( $runtime < $$self{defaults_limits}{runtime} ) { $runtime = $$self{default_limits}{runtime}; }
+        $runtime = "--time=$runtime";
+
+        my $bsub_cmd = qq[sbatch --parsable $runtime $memory --array='$bsub_ids' -e $job_name.\%a.e -o $job_name.\%a.o $cmd_file];
 
         # Submit to SLURM
         my $array_id = $self->_bsub_command($bsub_cmd,$cmd);
 
         for my $id (@$used_ids)
         {
-            $$jobs{Running}{$id} = { array_id=>$array_id, job_id=>-1, nfailures=>0, memlimit=>$mem };
+            $$jobs{Running}{$id} = { array_id=>$array_id, job_id=>-1, nfailures=>0, memlimit=>$mem, runtime=>$runtime };
             if ( exists($$jobs{Error}{$id}) ) 
             { 
                 $$jobs{Running}{$id}{nfailures} = $$jobs{Error}{$id}{nfailures}; 
@@ -455,6 +516,7 @@ sub run_jobs
 #   - job id        .. -1: unknown, 0: errored/finished, int: SLURM_JOBID (%J), same as `squeue -o '%A'`
 #   - nfailures     .. number of failures
 #   - memlimit      .. max memory used, negative if memory limit was exceeded, 0 for unknown [MB]
+#   - runtime       .. running time, negative if time limit was exceeded, 0 for unknown [minutes]
 sub _write_jobs
 {
     my ($self,$job_name,$jobs) = @_;
@@ -464,19 +526,19 @@ sub _write_jobs
     for my $id (keys %{$$jobs{Running}})
     {
         my $job = $$jobs{Running}{$id};
-        print $fh "$id\t$$job{array_id}\t$$job{job_id}\t$$job{nfailures}\t$$job{memlimit}\n";
+        print $fh "$id\t$$job{array_id}\t$$job{job_id}\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";
         if ( exists($$job{unlink}) ) { push @unlink,$$job{unlink}; }
     }
     for my $id (keys %{$$jobs{Error}})
     {
         my $job = $$jobs{Error}{$id};
-        print $fh "$id\t-1\t0\t$$job{nfailures}\t$$job{memlimit}\n";
+        print $fh "$id\t-1\t0\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";
         if ( exists($$job{unlink}) ) { push @unlink,$$job{unlink}; }
     }
     for my $id (keys %{$$jobs{Done}})
     {
         my $job = $$jobs{Done}{$id};
-        print $fh "$id\t0\t0\t$$job{nfailures}\t$$job{memlimit}\n";
+        print $fh "$id\t0\t0\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";
         if ( exists($$job{unlink}) ) { push @unlink,$$job{unlink}; }
     }
     close($fh) or $self->throw("close failed: $jids_file\n");
@@ -500,11 +562,12 @@ sub _read_jobs
     while (my $line=<$fh>)
     {
         chomp($line);
-        my ($id,$array_id,$job_id,$nfailures,$memlimit) = split(/\t/,$line);
+        my ($id,$array_id,$job_id,$nfailures,$memlimit,$runtime) = split(/\t/,$line);
         my $status = 'Running';
         if ( $array_id==-1 ) { $status = 'Error'; }
         elsif ( $array_id==0 ) { $status = 'Done'; }
-        $$jobs{$status}{$id} = { array_id=>$array_id, job_id=>$job_id, nfailures=>$nfailures, memlimit=>$memlimit };
+        $$jobs{$status}{$id} = { array_id=>$array_id, job_id=>$job_id, nfailures=>$nfailures, memlimit=>$memlimit, runtime=>$runtime };
+        $$jobs{all}{$id} = { array_id=>$array_id, job_id=>$job_id, nfailures=>$nfailures, memlimit=>$memlimit, runtime=>$runtime };
     }
     close($fh) or $self->throw("close failed: $jids_file\n");
     # print STDERR "jobs read: $job_name.jid\n"; print `cat $job_name.jid`;
