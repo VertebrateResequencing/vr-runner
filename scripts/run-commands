@@ -59,6 +59,10 @@ sub new
             # {
             #     "{outdir}/mapping.txt" => "{in}\t{out}",
             # },
+
+            # Optional required resources, minutes and MB
+            # limits   => { runtime=>60, memory=>5000 },
+
     ]."\n";
 
     $$self{usage} .= 
@@ -98,6 +102,8 @@ sub main
     `mkdir -p $$self{outdir}`;
 
     for my $file (@files) { $self->cmd("mkdir -p $$file{tmpdir}"); }
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
 
     for (my $i=0; $i<@{$$self{cmds}}; $i++)
     {
