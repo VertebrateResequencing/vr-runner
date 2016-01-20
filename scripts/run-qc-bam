@@ -168,7 +168,7 @@ sub get_file_list
         opendir(my $dh,$list) or $self->throw("$list: $!");
         while ( my $file = readdir($dh) ) 
         {
-            if ( !($file=~/\.bam$/i ) ) { next; }
+            if ( !($file=~/\.bam$/i) && !($file=~/\.cram$/i) ) { next; }
             if ( !($file=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $file"); }
             my $prefix = $self->unique_name($names,$`);
             $file    = "$list/$file";
