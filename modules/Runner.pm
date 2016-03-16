@@ -1208,6 +1208,92 @@ sub cmd
     return @out;
 }
 
+=head2 cmd3
+
+    About : Similar to cmd, this subroutine executes a command via bash in the
+            -o pipefail mode. However, unlike cmd, it returns both standard and
+            error output and captures error messages from multiple piped commands.
+            This requires IPC::Run3, which is not installed on installed systems.
+    Args  : <string>
+                The command to be executed
+            <hash>
+                Optional arguments: 
+                - exit_on_error     .. if set to 0, don't throw on errors. If not given, exit_on_error=1 is assumed
+                - require_status    .. throw if exit status is different [0]
+                - verbose           .. print command to STDERR before executing [0]
+    Usage:
+            my ($out,$err) = $self->cmd3("cmd1 | cmd2 | cmd3");
+            for my $line (@$out) { print $line; }
+            for my $line (@$err) { print $line; }
+
+=cut
+
+sub cmd3
+{
+    my ($self,$cmd,%args) = @_;
+
+    eval "require IPC::Run3";
+    if ( $@ )
+    { 
+        $self->warn("Warning: IPC::Run3 is not available on this system, using Runner::cmd instead of Runner::cmd3\n"); 
+        my @out = $self->cmd($cmd,%args);
+        return (\@out,[]);
+    }
+
+    if ( $$self{verbose} or $args{verbose} ) { print STDERR $cmd,"\n"; }
+
+    my $tmp;
+    (undef,$tmp) = File::Temp::tempfile("/tmp/runners.$$.XXXXX", OPEN=>0);
+
+    open(my $stderr,'>',"$tmp.e") or confess("$tmp.e: $!");
+    open(my $stdout,'>',"$tmp.o") or confess("$tmp.o: $!");
+
+    my @cmd = ('/bin/bash', '-o','pipefail','-c', $cmd);
+    IPC::Run3::run3(\@cmd,undef,$stdout,$stderr);
+
+    close($stderr);
+    close($stdout);
+
+    my $status  = $? >> 8;
+    my $signal  = $? & 127;
+
+    my (@out,@err);
+    if ( open(my $fh,'<',"$tmp.o") )
+    {
+        @out = <$fh>;
+        close($fh);
+    }
+    if ( open(my $fh,'<',"$tmp.e") )
+    {
+        @err = <$fh>;
+        close($fh);
+    }
+    unlink("$tmp.o");
+    unlink("$tmp.e");
+
+    if ( exists($args{exit_on_error}) && !$args{exit_on_error} ) { return (\@out,\@err); }
+
+    my $require_status = exists($args{require_status}) ? $args{require_status} : 0;
+    if ( $status ne $require_status ) 
+    {
+        my $msg;
+        if ( $signal )
+        {
+            $msg = "The command died with signal $signal";
+        }
+        else
+        {
+            $msg = "The command exited with status $status (expected $require_status)";
+        }
+        $msg .= ":\n\t$cmd\n\n";
+        if ( @out ) {  $msg .= join('',@out,"\n\n"); }
+        $self->throw($msg); 
+    }
+
+    return (\@out,\@err);
+}
+
+
 =head2 throw
 
     About : Throws an error.
