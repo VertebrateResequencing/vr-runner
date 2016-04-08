@@ -1,0 +1,269 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+use Runner::Chunk;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{limits}  = { memory=>2_000, runtime=>3*24*60 };
+    $$self{max_samples} = 1000;
+    $$self{max_size_Mb} = 10; 
+    $$self{pbwt}     = 'pbwt';
+    $$self{bcftools} = 'bcftools';
+    $$self{pbwt_ref} = 'imputation-ref-panels/pbwt/chr{CHROM}.1000g';
+    $$self{fa_ref}   = 'ref/hs37d5.fa';
+    $$self{regions}  = [1..22];
+    $$self{fmt}      = 'bcf';
+
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+
+        # For sanity checking that your config file is not obsolete. Update
+        # the version key in your config file to get rid of the warnings.
+        version  => '] .$$self{config_version}. q[',
+
+        pbwt     => '] .$$self{pbwt}.     q[',
+        bcftools => '] .$$self{bcftools}. q[',
+        pbwt_ref => '] .$$self{pbwt_ref}. q[',
+        fa_ref   => '] .$$self{fa_ref}.   q[',
+
+        # add custom annotations
+        annotate => undef,
+
+        regions  => [1..22],
+        fmt      => '] .$$self{fmt}. q[',       # output fmt: bcf or vcf
+
+        # merging the imputation results will run in parallel over chunks of this size (Mbp)
+        max_size_Mb => ] .$$self{max_size_Mb}. q[,
+
+        # max samples for pbwt imputation. Input VCF will be split into subsets
+        # containing at most this many samples
+        max_samples => ] .$$self{max_samples}. q[,
+
+        limits => { memory=>2_000, runtime=>3*24*60 },
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Run PBWT imputation on a list of VCF/BCF files\n" .
+        "Usage: run-pbwt\n" .
+        "Options:\n" .
+        "   -f, --file <file>           VCF/BCF file to impute\n" .
+        "   -l, --list <file>           File with VCF/BCF file names\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f' or $arg eq '--file' ) { $$self{file}=shift(@ARGV); next; }
+        if ( $arg eq '-l' or $arg eq '--list' ) { $$self{vcfs}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{file}) && !defined($$self{vcfs}) ) { $self->throw("Expected one of the -f or -l options."); }
+    if ( defined($$self{vcfs}) ) { $$self{vcfs} = $self->read_list($$self{vcfs}); }
+    if ( defined($$self{file}) ) { push @{$$self{vcfs}},$$self{file}; }
+    my @chrs = @{$$self{regions}};
+    $$self{regions} = {};
+    for my $chr (@chrs) { $$self{regions}{$chr} = 1; }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    $self->save_config("pbwt.conf");
+
+    my $outdir = $$self{outdir};
+    if ( $self->is_finished("$outdir/all_done") ) { $self->all_done; }
+    `mkdir -p $outdir`;
+
+
+    # split by sample and by chromosome
+    my $samples = $self->Runner::Chunk::split_samples(
+                nsmpl => $$self{max_samples},
+                vcf   => \@{$$self{vcfs}},
+                cache => "$outdir/chunks.sample.txt",
+                dir   => $outdir,
+                write => { vcf=>0, list=>1 },
+            );
+    my $chrs = Runner::Chunk::list_chrs(
+                vcf     => \@{$$self{vcfs}},
+                cache   => "$outdir/chunks.chr.txt",
+                regions => $$self{regions},
+            );
+
+
+    # run pbwt
+    my %merge = ();
+    for my $chunk (@$samples)
+    {
+        for my $chr (keys %$chrs)
+        {
+            my $src_file = $$chunk{src_file};
+            if ( !exists($$chrs{$chr}{$src_file}) ) { next; }
+
+            $self->spawn('run_pbwt',"$$chunk{dst_dir}/$$chunk{dst_file}.$chr.bcf",
+                    samples => "$$chunk{dst_dir}/$$chunk{dst_file}.samples",
+                    vcf     => $$chunk{src_file},
+                    region  => $chr,
+                );
+            push @{$merge{'all'}{$chr}}, "$$chunk{dst_dir}/$$chunk{dst_file}.$chr.bcf";
+        }
+    }
+    $self->wait;
+
+
+    # merge samples back, but do this in parallel on smaller chunks, as merging is slow with many samples
+    my @merge = ();
+    for my $src_file (keys %merge)
+    {
+        for my $chr (keys %{$merge{$src_file}})
+        {
+            push @merge, { src_file=>$src_file, region=>$chr, vcf=>$merge{$src_file}{$chr}, fmt=>'bcf' };
+        }
+    }
+    my $merged = $self->Runner::Chunk::merge_samples(
+                files   => \@merge,
+                dir     => "$outdir/merged",
+                size_bp => $$self{max_size_Mb}*1e6
+            );
+
+
+    # add custom annotations
+    if ( defined $$self{annotate} )
+    {
+        for my $file (@merge)
+        {
+            my $fmt = $$self{fmt} eq 'vcf' ? 'vcf.gz' : 'bcf';
+            $$file{dst_file_raw} = $$file{dst_file};
+            $$file{dst_file}     = "$$file{dst_file}.annot";
+            $self->spawn('annotate',"$$file{dst_dir}/$$file{dst_file}.$fmt","$$file{dst_dir}/$$file{dst_file_raw}.bcf",$$self{annotate},$$self{fmt});
+        }
+        $self->wait;
+    }
+
+
+    if ( !$self->is_finished("$outdir/mapping.txt") )
+    {
+        open(my $fh,'>',"$outdir/mapping.txt.part") or $self->throw("$outdir/mapping.txt.part");
+        for my $file (@merge)
+        {
+            my $fmt = $$self{fmt} eq 'vcf' ? 'vcf.gz' : 'bcf';
+            print $fh "$$file{src_file}\t$$file{region}\t$$file{dst_dir}/$$file{dst_file}.$fmt\n";
+        }
+        close($fh) or $self->throw("close failed: $outdir/mapping.txt.part");
+        rename("$outdir/mapping.txt.part","$outdir/mapping.txt") or $self->throw("rename $outdir/mapping.txt.part $outdir/mapping.txt: $!");
+    }
+
+#   $self->clean();
+    $self->cmd("touch $outdir/all_done");
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self) = @_;
+    $self->SUPER::clean($$self{outdir});
+}
+
+sub save_config
+{
+    my ($self,$name) = @_;
+    my $src = $$self{_config} ? $$self{_config} : undef;
+    my $dst = "$$self{outdir}/$name";
+    if ( -e $dst && (!defined($src) or (stat($src))[9] <= (stat($dst))[9]) ) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    if ( defined $src ) { $self->cmd("cat $src >> $dst"); }
+}
+sub read_list
+{
+    my ($self,$list) = @_;
+    my @out = ();
+    open(my $fh,'<',$list) or $self->throw("$list: $!");
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        push @out,$line;
+    }
+    close($fh) or $self->throw("close failed: $list");
+    return \@out;
+}
+sub expand_chrom
+{
+    my ($self,$path,$region) = @_;
+    if ( !defined $region ) { return $path; }
+    $region =~ s/:.*$//;
+    $path =~ s/{CHROM}/$region/g;
+    return $path;
+}
+sub index_part
+{
+    my ($self,$vcf) = @_;
+    $self->cmd("bcftools index -f $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
+}
+
+sub run_pbwt
+{
+    my ($self,$outfile,%args) = @_;
+
+    my $pbwt_ref = $self->expand_chrom($$self{pbwt_ref},$args{region});
+    if ( ! -e "$pbwt_ref.pbwt" && $pbwt_ref=~/\.pbwt$/ ) { $pbwt_ref =~ s/\.pbwt$//; }
+    if ( ! -e "$pbwt_ref.pbwt" ) { $self->throw("No such file: $pbwt_ref.pbwt .. [$$self{pbwt_ref},$args{region}]\n"); }
+
+    my $cmd = 
+        "$$self{bcftools} view -Ou -r $args{region} -S $args{samples} $args{vcf} " .
+        " | $$self{pbwt} -log $outfile.log -readVcfGT - -referenceFasta $$self{fa_ref} -referenceImpute $pbwt_ref -writeBcfGz $outfile.part";
+
+    $self->cmd($cmd);
+
+    $self->index_part($outfile);
+}
+
+sub annotate
+{
+    my ($self,$outfile,$infile,$cmd,$fmt) = @_;
+    my $out = $fmt eq 'vcf' ? '-Oz' : '-Ob';
+    $cmd =~ s/^\s*\|//;
+    $cmd =~ s/\|\s*$//;
+    $self->cmd("$$self{bcftools} view -Ou $infile | $cmd | $$self{bcftools} $out -o $outfile.part");
+    $self->index_part($outfile);
+}
+
+
