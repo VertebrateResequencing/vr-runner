@@ -274,9 +274,18 @@ sub update_html_report
 {
     my ($opts,$projects) = @_;
 
-    push @$projects, list_finished_projects($opts);
+    my @finished = list_finished_projects($opts);
+    my %finished = ();
+    for my $project (@finished) { $finished{$$project{run_id}} = 1; }
+
     my %chains = ();
     for my $project (@$projects)
+    {
+        # if the project just finished, it is in both lists: don't show it twice
+        if ( $finished{$$project{run_id}} ) { next; }
+        push @{$chains{$$project{config}}}, $project;
+    }
+    for my $project (@finished)
     {
         push @{$chains{$$project{config}}}, $project;
     }
@@ -382,7 +391,7 @@ sub update_html_report
         <div class="content">
 
         <h3 style='margin-bottom:0px;'>Runner jobs</h3>
-        in <a href=".">$$opts{dropbox}</a>
+        in <a href="." target="_blank">$$opts{dropbox}</a>
     ];
 
     my $rel_dbox = $$opts{dropbox};
@@ -425,6 +434,7 @@ sub update_html_report
             for my $step (@{$$project{steps}})
             {
                 my $url = '';
+                my $url_conf = '';
                 my $class = '';
                 my $elapsed = '';
                 if ( -e "$abs_dir/$$project{name}.$step.done" )
@@ -436,11 +446,12 @@ sub update_html_report
                         $tot_time += $info{finished} - $info{started};
                     }
                     $class='status-done'; 
-                    if ( -e "$abs_dir/$$project{name}.$step.conf" ) { $url = "$rel_dir/$$project{name}.$step.conf"; }
+                    if ( -e "$abs_dir/$$project{name}.$step.conf" ) { $url_conf = "$rel_dir/$$project{name}.$step.conf"; }
                 }
                 elsif ( !-e "$abs_dir/$$project{name}.$step" )  { $class='status-todo'; }
                 elsif ( $prev_done )
                 {
+                    $url_conf = "$rel_dir/$$project{name}.$step.conf";
                     if ( $is_error )
                     {
                         $class = 'status-error';
@@ -462,13 +473,17 @@ sub update_html_report
                     $prev_done = 0;
                 }
 
+                if ( !$url ) { $url = $url_conf; }
                 my $url_beg = '';
                 my $url_end = '';
-                if ( $url ) { $url_beg = "<a href='$url'>"; $url_end = '</a>'; }
+                my $url_conf_beg = '';
+                my $url_conf_end = '';
+                if ( $url ) { $url_beg = "<a href='$url' target='_blank'>"; $url_end = '</a>'; }
+                if ( $url_conf ) { $url_conf_beg = "<a href='$url_conf' target='_blank'>"; $url_conf_end = '</a>'; }
                 push @steps_brief,"<td style='text-align:center;'>$url_beg<span class='status-btn $class'></span>$url_end\n";
                 push @steps_detail,qq[<tr>
                         <td><span class='status-btn $class'></span>
-                        <td>$url_beg$step$url_end
+                        <td>$url_conf_beg$step$url_conf_end
                         <td>$elapsed
                     ];
             }
@@ -482,8 +497,8 @@ sub update_html_report
                         <tr><td style='text-align:center;'>
                                 <span class='glyphicon glyphicon-remove' style='cursor:pointer' onclick="\$('#c$div_id').toggle()"></span>
                             <td colspan='2' style='text-align:right;'>
-                                <a class='glyphicon glyphicon-info-sign' href='$rel_dir/$$project{name}'></a>
-                                <a class='glyphicon glyphicon-home' href='$prj_dir' style='padding-left:1em;'></a>
+                                <a class='glyphicon glyphicon-info-sign' href='$rel_dir/$$project{name}' target='_blank'></a>
+                                <a class='glyphicon glyphicon-home' href='$prj_dir' style='padding-left:1em;' target='_blank'></a>
                         <tr><th><th>Config<th>Time
                     ] .join("\n",@steps_detail). qq[
                         <tr><td><td><td>$tot_time
@@ -516,7 +531,7 @@ sub list_finished_projects
         my $run_id = $1;
         my $name   = $2;
         my $tmpdir = "$$opts{dropbox_out}/$dir/tmp-data/$dir";
-        my $project = parse_project($opts,$tmpdir,$name,$run_id);
+        my $project = parse_project($opts,$tmpdir,$name,$run_id.'_'.$name);
         if ( !defined $project ) { next; }
         $$project{finished} = 1;
         $$project{tmpdir} = $tmpdir;
@@ -613,7 +628,7 @@ sub clean_project
             if ( exists($$project{chgrp}) ) { system("chgrp -R $$project{chgrp} $$opts{dropbox_out}/$$project{run_id}"); }
             for my $file (@{$$project{outputs}{$dst}})
             {
-                my $src = expand_vars($opts,$project,$file);
+                my $src = expand_vars({%$opts,%$project},$file);
                 cmd($opts,"mv $src $$opts{dropbox_out}/$$project{run_id}/$dst/");
             }
         }
@@ -624,7 +639,7 @@ sub clean_project
             if ( $dst =~ m{([^/]+)$} ) { $dir = "$dir/$`"; $dst = "$dir/$1"; }
             cmd($opts,"mkdir -p $dir");
             if ( exists($$project{chgrp}) ) { system("chgrp $$project{chgrp} $dir"); }
-            $src = expand_vars($opts,$project,$src);
+            $src = expand_vars({%$opts,%$project},$src);
             cmd($opts,"mv $src $dst");
         }
     }
@@ -633,17 +648,18 @@ sub clean_project
     cmd($opts,"mv $$opts{dropbox_tmp}/$$project{run_id} $$opts{dropbox_out}/$$project{run_id}/tmp-data");
 }
 
-# Parse the project definition
+# Parse the project definition. There are three levels: setup, chain and steps. Setup can
+# override defaults in chain and steps, chain can override steps.
 sub parse_project
 {
     my ($opts,$dir,$name,$run_id) = @_;
-    my %project  = ();
-    my %override = ();
+    my %project = ();
+    my %setup   = ();
 
     # the error period can be overriden by projects, set the default here
     $project{err_period} = $$opts{err_period};
 
-    # parse the small project file
+    # parse the setup file
     my $file = "$dir/$name";
     open(my $fh,'<',$file) or error("$file: $!");
     while (my $line=<$fh>)
@@ -665,7 +681,7 @@ sub parse_project
         $value = parse_config_value($value);    # expand deep variables (arrays or hashes)
         $key   =~ s/\s*$//;
 
-        if ( $key =~ /^\./ )
+        if ( $key =~ /^\./ )    # "global" variables start with a dot
         {
             $key = $';
             $project{$key} = $value;
@@ -679,13 +695,15 @@ sub parse_project
             my $step  = $`;
             my $key   = $';
             my @steps = ($step=~/,/) ? split(/\s*,\s*/,$step) : ($step);
-            for my $step (@steps) { $override{"$step/$key"} = $value; }
+            for my $step (@steps) { $setup{"$step/$key"} = $value; }
             next;
         }
 
-        $override{"*/$key"} = $value;
+        # The key is meant to override all steps
+        $setup{"*/$key"} = $value;
     }
     close($fh) or error("close failed: $file");
+    $project{setup_file} = $file;
     $project{name}   = $name;
     $project{run_id} = $run_id;
     $project{prefix} = $project{chdir_into_project} ? $name : "$$opts{dropbox_tmp}/$run_id/$name";
@@ -695,41 +713,66 @@ sub parse_project
     if ( exists($$opts{admin_email}) ) { $email{$$opts{admin_email}} = 1; }
     if ( scalar keys %email ) { $project{email} = join(' ',keys %email); }
 
-    # Read the chain file
-    if ( !exists($project{config}) )
+    my $chain = parse_chain($opts,\%project);
+    if ( !defined $chain )
     {
-        print STDERR "Config not present in $file\n";
         if ( $$opts{ignore_failures} ) { return undef; }
         error("Failed: $file\n");
     }
-    if ( $project{config} =~ m{/} )
+
+    # Parse all steps and expand variables
+    for my $step_name (@{$$chain{steps}})
+    {
+        my $step = parse_step($opts,\%project,\%setup,$chain,$step_name);
+        if ( !defined $step )
+        {
+            if ( $$opts{ignore_failures} ) { return undef; }
+            error("Failed: $file\n");
+        }
+        $project{$step_name} = $step;
+    }
+    %project = ( %$chain, %project );
+    return \%project;
+}
+
+sub parse_chain
+{
+    my ($opts,$project) = @_;
+
+    # Read the chain file
+    if ( !exists($$project{config}) )
+    {
+        print STDERR "Config not present in $$project{setup_file}\n";
+        return undef;
+    }
+    if ( $$project{config} =~ m{/} )
     {
         print STDERR "The config must be a plain file in $$opts{dropbox_conf},\n";
-        print STDERR "please remove the directory part from $project{config}.\n";
-        if ( $$opts{ignore_failures} ) { return undef; }
-        error("Failed: $file\n");
-     }
-    my $config_fname = "$$opts{dropbox_conf}/$project{config}";
-    my $ret = open($fh,'<',$config_fname);
+        print STDERR "please remove the directory part from $$project{config}\n";
+        print STDERR "in $$project{setup_file}.\n";
+        return undef;
+    }
+    my $chain_file = "$$opts{dropbox_conf}/$$project{config}";
+    my $ret = open(my $fh,'<',$chain_file);
     if ( !$ret ) 
     {
-        print STDERR "No such config in $$opts{dropbox_conf}:\n\t$config_fname\n";
-        if ( $$opts{ignore_failures} ) { return undef; }
-        error("Failed: $file\n");
+        print STDERR "No such config in $$opts{dropbox_conf}:\n\t$chain_file\n";
+        return undef;
     }
     my @config_lines = <$fh>;
-    close($fh) or error("close failed: $config_fname");
+    close($fh) or error("close failed: $chain_file");
     my $config_str = join('',@config_lines);
     my $x = eval "{ $config_str }";
-    if ( $@ ) { error("eval $config_fname: $@\n"); }
+    if ( $@ ) { error("eval $chain_file: $@\n"); }
 
+    if ( !exists($$x{steps}) )
+    {
+        print STDERR "The chain has no steps: $chain_file\n";
+        return undef;
+    }
+    $$project{chain_file} = $chain_file;
 
-    # Parse the chain file, include all steps, expand variables
-    $x = parse_config($opts,$config_fname,\%override,\%project,$x);
-    %project = (%project, %$x);
-    if ( !@{$project{steps}} ) { error("No steps defined in the pipeline: $config_fname\n\n"); }
-
-    return \%project;
+    return $x;
 }
 
 sub parse_config_value
@@ -745,91 +788,98 @@ sub parse_config_value
     return $value;
 }
 
-sub parse_config
+sub parse_step
 {
-    my ($opts,$fname,$override,$project,$config) = @_;
+    my ($opts,$project,$setup,$chain,$step_name) =  @_;
 
-    # expand steps keys shared by all steps (i.e. "*/key: value")
-    for my $var (keys %$override)
+    if ( !exists($$chain{$step_name}) )
     {
-        my ($step,$key) = split(m{/},$var);
-        if ( $step ne '*' ) { next; }
-        my $value = $$override{$var};
-        delete($$override{$var});
-        for my $step (@{$$config{steps}}) { $$override{"$step/$key"} = $value; }
+        print STDERR "Undefined step in $$project{chain_file}\n";
+        return undef;
     }
 
-    # Include all steps, expand variables
-    for my $step (@{$$config{steps}})
+    my $step = {};
+    if ( exists($$chain{$step_name}{include}) )
     {
-        if ( !exists($$config{$step}) ) { error("Step \"$step\" undefined in $fname\n"); }
+        my $step_file = "$$opts{dropbox_conf}/$$chain{$step_name}{include}";
+        open(my $fh,'<',$step_file) or error("$step_file: $!");
+        my @step_lines = <$fh>;
+        close($fh) or error("close failed: $step_file");
 
-        for my $key (keys %{$$config{$step}})
+        my $tmp = join('',@step_lines);
+        $step = eval "{ $tmp }";
+        if ( $@ ) 
+        { 
+            print STDERR "eval $step_file: $@\n"; 
+            return undef;
+        }
+    } 
+
+    # the step's keys "run" and "config" can be overriden by chain
+    %$step = ( %$step, %{$$chain{$step_name}} );
+
+    # set step-specific keys ("pbwt/key: value") and keys shared by all steps ("*/key: value")
+    my %reserved = map { $_ => 1 } (qw(include run));
+    my %predef = ( prefix=>$$project{prefix} );
+    for my $var (keys %$setup)
+    {
+        my ($name,$key) = split(m{/},$var);
+        if ( $name eq '*' or $name eq $step_name )
         {
-            # Step definition in the chain file. With the exception of include's
-            # see if the  value can be expanded, then use it to override step's config
-            if ( $key ne 'include' ) 
+            $$step{$key} = $$setup{$var};
+            if ( !exists($predef{$key}) && defined $$setup{$var} ) { $predef{$key} = $$setup{$var}; }
+        }
+    }
+    for my $var (keys %{$$chain{$step_name}})
+    {
+        if ( $reserved{$var} or exists($predef{$var}) or !defined $$chain{$step_name}{$var} ) { next; }
+        $predef{$var} = expand_vars(\%predef,$$chain{$step_name}{$var});
+    }
+
+    # expand 
+    for my $key (keys %$step)
+    {
+        my $value = $$step{$key};
+        if ( !defined $value ) { next; }    # allow undef as override
+        $value = expand_vars(\%predef,$value);
+        $value = parse_config_value($value);    # eval array/hash chain variables
+        $$step{$key} = $value;
+    }
+
+    if ( exists($$step{config}) )
+    {
+        # override defaults in step's runner config
+        for my $key (keys %{$$step{config}})
+        {
+            if ( $reserved{$key} ) { next; } # reserved keys
+            if ( exists($predef{$key}) )
             {
-                my $value = $$config{$step}{$key};
-                if ( defined $value )   # propagate "key=>undef" to step config
-                {
-                    $value = expand_vars($project,$project,$value);
-                }
-                if ( !exists($$override{"$step/$key"}) ) { $$override{"$step/$key"} = $value; }
-                next; 
+                $$step{config}{$key} = parse_config_value($predef{$key});
             }
+        }
 
-            my $config_fname = "$$opts{dropbox_conf}/$$config{$step}{include}";
-            open(my $fh,'<',$config_fname) or error("$config_fname: $!");
-            my @config_lines = <$fh>;
-            close($fh) or error("close failed: $config_fname");
-            my $config_str = join('',@config_lines);
-            my $x = eval "{ $config_str }";
-            if ( $@ ) { error("eval $config_fname: $@\n"); }
-            $$config{$step} = {(%{$$config{$step}},%$x)};
-        }
-    }
-    for my $var (keys %$override)
-    {
-        my ($step,$key) = split(m{/},$var);
-        my $value = $$override{$var};
-        if ( exists($$config{$step}{config}) )
-        {
-            # The step has a config (i.e. a runner). In this case we create
-            # a new config key but also expand all \$($key) occurances.
-            $$config{$step}{config}{$key} = $value;
-        }
-        # All \$($key) occurances will be expanded
-        $$config{$step}{$key} = $value;
+        use Data::Dumper;
+        my @config_lines = split(/\n/,Dumper($$step{config}));
+        shift(@config_lines);       # get rid of $VAR1 = { .. } lines
+        pop(@config_lines);
+        $$step{config} = join("\n",@config_lines)."\n";
     }
 
-    # Convert config to text
-    for my $step (@{$$config{steps}})
-    {
-        if ( exists($$config{$step}{config}) )
-        {
-            use Data::Dumper;
-            my @config_lines = split(/\n/,Dumper($$config{$step}{config}));
-            shift(@config_lines);       # get rid of $VAR1 = { .. } lines
-            pop(@config_lines);
-            $$config{$step}{config} = join("\n",@config_lines)."\n";
-        }
-    }
-    return $config;
+    return $step;
 }
 
 # Replace variables $(var_name)
 sub expand_vars
 {
-    my ($opts,$project,$str) = @_;
+    my ($vars,$str) = @_;
     pos($str) = 0;
     while ( ($str =~ /\G(.*?)\$\(([^:\)]+):([^\)]*)\)/s) )
     {
         if ( !defined pos($str) ) { pos($str) = 0; }
         pos($str) += length($&);
-        if ( exists($$project{$2}) ) 
+        if ( exists($$vars{$2}) ) 
         { 
-            $str = $` . $1 . $$project{$2} . $'; 
+            $str = $` . $1 . $$vars{$2} . $'; 
             next; 
         }
         else
@@ -842,9 +892,9 @@ sub expand_vars
     {
         if ( !defined pos($str) ) { pos($str) = 0; }
         pos($str) += length($&);
-        if ( exists($$project{$2}) ) 
+        if ( exists($$vars{$2}) ) 
         { 
-            $str = $` . $1 . $$project{$2} . $'; 
+            $str = $` . $1 . $$vars{$2} . $'; 
             next; 
         }
     }
@@ -893,7 +943,7 @@ sub run_project
 
         if ( exists($$project{$step}{config}) && !-e "$prefix.$step.conf" )
         {
-            my $config = expand_vars($opts,$$project{$step},$$project{$step}{config});
+            my $config = expand_vars({%$opts,%{$$project{$step}}},$$project{$step}{config});
             open(my $fh,'>',"$prefix.$step.conf.part") or error("$prefix.$step.conf.part: $!");
             print $fh $config;
             close($fh) or error("close failed: $prefix.$step.conf.part");
@@ -960,12 +1010,18 @@ sub cmd
 sub run_step
 {
     my ($opts,$project,$step_name) = @_;
-    my $step = $$project{$step_name};
+    my $step = { %{$$project{$step_name}} };
     $$step{prefix} = $$project{prefix};
     $$step{step}   = $step_name;
-    for my $job (@{$$step{run}})
+    for (my $icmd=0; $icmd<@{$$step{run}}; $icmd++)
     {
-        my $cmd = expand_vars($opts,$step,$$job{cmd});
+        my $job = $$step{run}[$icmd];
+
+        my $done_file = "$$project{prefix}.$step_name.$icmd.done";
+        if ( -e $done_file ) { next; }
+        cmd($opts,"touch $done_file.part");
+
+        my $cmd = expand_vars({%$project,%$step},$$job{cmd});
 
         if ( !exists($$job{status}) or !exists($$job{status}{done}) ) { $$job{status}{done} = [0]; }
         my %done = map { $_=>1 } @{$$job{status}{done}};
@@ -975,7 +1031,11 @@ sub run_step
         {
             debug_msg($opts, "Running step $step_name: $cmd\n");
             my ($signal,$status,$out,$err) = cmd($opts,$cmd);
-            if ( !$signal && $done{$status} ) { last; }
+            if ( !$signal && $done{$status} )
+            {
+                rename("$done_file.part",$done_file) or error("rename $done_file.part $done_file: $!");
+                last; 
+            }
             if ( !$signal && $loop{$status} )
             {
                 if ( !$$opts{loop} ) { return 0; }
