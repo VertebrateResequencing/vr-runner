@@ -262,7 +262,7 @@ sub annotate
     my $out = $fmt eq 'vcf' ? '-Oz' : '-Ob';
     $cmd =~ s/^\s*\|//;
     $cmd =~ s/\|\s*$//;
-    $self->cmd("$$self{bcftools} view -Ou $infile | $cmd | $$self{bcftools} $out -o $outfile.part");
+    $self->cmd("$$self{bcftools} view -Ou $infile | $cmd | $$self{bcftools} view $out -o $outfile.part");
     $self->index_part($outfile);
 }
 
