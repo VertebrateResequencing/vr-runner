@@ -31,11 +31,10 @@ sub new
     $$self{tabix}       = '/software/vertres/bin-external/tabix-exp-rc';
     $$self{bcftools}    = '/software/vertres/bin-external/bcftools-exp-rc';
     $$self{bcftools_plugins} = '/nfs/users/nfs_p/pd3/git/bcftools/plugins-xxx';
-    $$self{htslib_so}   = '/software/vertres/bin-external/samtools-current-exp-rc/lib/libhts.so.1';
-    $$self{beagle_jar}  = '/nfs/users/nfs_p/pd3/sandbox/svn/beagle/b4.r1398.jar';
+    $$self{beagle_jar}  = '/nfs/users/nfs_p/pd3/sandbox/svn/beagle/beagle.22Feb16.8ef.jar';
     $$self{beagle_args} = '';
     $$self{beagle_tags} = 'INFO,FORMAT';
-    $$self{java_exec}   = '/software/jdk1.7.0_71/bin/java';
+    $$self{java_exec}   = '/software/jdk1.8.0_60/bin/java';
     $$self{java_args}   = '';
     $$self{phased_concat_args} = '';
     $$self{memstep} = 2_000;
@@ -59,8 +58,8 @@ sub new
             beagle_tags => '] .$$self{beagle_tags}. q[',    # bcftools annotate -c args: all INFO,FORMAT tag
             java_exec   => '] .$$self{java_exec}. q[',
             java_args   => '',
+            tabix       => '] .$$self{tabix}. q[',
             bcftools    => '] .$$self{bcftools}. q[',
-            htslib_so   => '] .$$self{htslib_so}. q[',
             bcftools_plugins   => '] .$$self{bcftools_plugins}. q[',
             concat_args => '] .$$self{concat_args}. q[',
 
@@ -220,13 +219,6 @@ sub bcftools_sanity_check
 {
     my ($self) = @_;
     if ( exists($$self{bcftools_plugins}) ) { $ENV{BCFTOOLS_PLUGINS} = $$self{bcftools_plugins}; }
-    if ( exists($$self{htslib_so}) ) 
-    { 
-        my $ld_path = $$self{htslib_so};
-        $ld_path =~ s{[^/]+$}{};
-        $ENV{LD_LIBRARY_PATH} = exists($ENV{LD_LIBRARY_PATH}) ? "$ld_path:$ENV{LD_LIBRARY_PATH}" : $ld_path;
-
-    }
     `$$self{bcftools} +fixploidy -h 2>&1`;
     if ( $? )
     {
@@ -235,9 +227,8 @@ sub bcftools_sanity_check
             "\n-----------------------------------------------------------------------------------------------------------\n",
             @out, 
             "\n-----------------------------------------------------------------------------------------------------------\n" .
-            "\nCould not run \"bcftools +fixploidy -h\". Are these environment variables correct, is libhts.so accessible?\n" .
+            "\nCould not run \"bcftools +fixploidy -h\". Is this environment variable correct?\n" .
             "\tBCFTOOLS_PLUGINS=$ENV{BCFTOOLS_PLUGINS}\n" .
-            "\tLD_LIBRARY_PATH=$ENV{LD_LIBRARY_PATH}\n" .
             "\n-----------------------------------------------------------------------------------------------------------\n\n\n"
             );
     }
