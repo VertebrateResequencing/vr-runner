@@ -148,29 +148,15 @@ sub main
     {
         for my $chr (keys %{$merge{$src_file}})
         {
-            push @merge, { src_file=>$src_file, region=>$chr, vcf=>$merge{$src_file}{$chr}, fmt=>'bcf' };
+            push @merge, { src_file=>$src_file, region=>$chr, vcf=>$merge{$src_file}{$chr}, fmt=>$$self{fmt} };
         }
     }
     my $merged = $self->Runner::Chunk::merge_samples(
-                files   => \@merge,
-                dir     => "$outdir/merged",
-                size_bp => $$self{max_size_Mb}*1e6
+                files    => \@merge,
+                dir      => "$outdir/merged",
+                size_bp  => $$self{max_size_Mb}*1e6,
+                annotate => $$self{annotate}
             );
-
-
-    # add custom annotations
-    if ( defined $$self{annotate} )
-    {
-        for my $file (@merge)
-        {
-            my $fmt = $$self{fmt} eq 'vcf' ? 'vcf.gz' : 'bcf';
-            $$file{dst_file_raw} = $$file{dst_file};
-            $$file{dst_file}     = "$$file{dst_file}.annot";
-            $self->spawn('annotate',"$$file{dst_dir}/$$file{dst_file}.$fmt","$$file{dst_dir}/$$file{dst_file_raw}.bcf",$$self{annotate},$$self{fmt});
-        }
-        $self->wait;
-    }
-
 
     if ( !$self->is_finished("$outdir/mapping.txt") )
     {
@@ -233,8 +219,16 @@ sub expand_chrom
 sub index_part
 {
     my ($self,$vcf) = @_;
-    $self->cmd("bcftools index -f $vcf.part");
     my $suffix = 'csi';
+    if ( $vcf =~ /\.bcf$/i )
+    {
+        $self->cmd("bcftools index -f $vcf.part");
+    }
+    else
+    {
+        $self->cmd("bcftools index -ft $vcf.part");
+        $suffix = 'tbi';
+    }
     rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
     rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
 }
@@ -255,15 +249,4 @@ sub run_pbwt
 
     $self->index_part($outfile);
 }
-
-sub annotate
-{
-    my ($self,$outfile,$infile,$cmd,$fmt) = @_;
-    my $out = $fmt eq 'vcf' ? '-Oz' : '-Ob';
-    $cmd =~ s/^\s*\|//;
-    $cmd =~ s/\|\s*$//;
-    $self->cmd("$$self{bcftools} view -Ou $infile | $cmd | $$self{bcftools} view $out -o $outfile.part");
-    $self->index_part($outfile);
-}
-
 

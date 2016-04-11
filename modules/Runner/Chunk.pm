@@ -468,7 +468,10 @@ sub run_cmd
 =head2 merge_samples
 
     About : Merges a list of VCF or BCF files
-    Args  : <bcftools>
+    Args  : <annotate>
+                If supplied and not equal to undef, stream through annotation
+                command when merging chunks
+            <bcftools>
                 Sets bcftools binary if different from "bcftools"
             <dir>
                 Output directory
@@ -520,11 +523,19 @@ sub merge_samples
 
         my $fmt = $$task{fmt} && $$task{fmt} eq 'vcf' ? 'vcf.gz' : 'bcf';
         my $out = $$task{fmt} && $$task{fmt} eq 'vcf' ? '-Oz' : '-Ob';
+        if ( defined $args{annotate} )
+        {
+            my $annot = $args{annotate};
+            $annot =~ s/^\s*\|//;
+            $annot =~ s/\|\s*$//;
+            $out = " -Ou | $annot $out";
+        }
+
         for my $chunk (@$chunks)
         {
             my $outfile = "$prefix/$$chunk{chr}:$$chunk{beg}-$$chunk{end}.$fmt";
             my $cmd = 
-                "$args{bcftools} merge -l $prefix.merge $out -o $outfile.part -r $$chunk{chr}:$$chunk{beg}-$$chunk{end} && " .
+                "$args{bcftools} merge -l $prefix.merge -r $$chunk{chr}:$$chunk{beg}-$$chunk{end} $out -o $outfile.part && " .
                 "$args{bcftools} index $outfile.part && " .
                 "mv $outfile.part.csi $outfile.csi && " . 
                 "mv $outfile.part $outfile";

@@ -252,8 +252,16 @@ sub expand_chrom
 sub index_part
 {
     my ($self,$vcf) = @_;
-    $self->cmd("bcftools index -f $vcf.part");
     my $suffix = 'csi';
+    if ( $vcf =~ /\.bcf$/i )
+    {
+        $self->cmd("bcftools index -f $vcf.part");
+    }
+    else
+    {
+        $self->cmd("bcftools index -ft $vcf.part");
+        $suffix = 'tbi';
+    }
     rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
     rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
 }
@@ -268,7 +276,7 @@ sub run_eagle
     my $gen_map = $self->expand_chrom($$self{gen_map},$args{region});
     if ( ! -e $gen_map ) { $self->throw("No such file: $gen_map .. [$$self{gen_map},$args{region}]\n"); }
 
-    my $cmd = "$$self{eagle} --chrom $args{region} --vcfRef $vcf_ref --vcfTarget $args{vcf} --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part";
+    my $cmd = "$$self{eagle} --chrom $args{region} --vcfRef $vcf_ref --vcfTarget $args{vcf} --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part > $outfile.log";
     $self->cmd($cmd);
 
     $self->cmd("bcftools index -f $outfile.part.bcf");
