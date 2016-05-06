@@ -123,24 +123,38 @@ sub init_jobs
     open(my $fh, '<', $jids_file) or confess("$jids_file: $!");
     my $path;
     my @jids = ();
+    my @jid_lines = ();
     while (my $line=<$fh>)
     {
+        push @jid_lines,$line;
         if ( !($line=~/^(\d+)\s+([^\t]*)/) ) { confess("Uh, could not parse \"$line\".\n") }
         push @jids, $1;     # LSF array ID
-        if ( !defined $path ) { $path = $2; }
-        if ( $path ne $2 ) { confess("$path ne $2\n"); }
+        if ( !defined $path ) { $path = $2; $path =~ s{/+}{/}g; }
+        my $tmp = $2;
+        $tmp =~ s{/+}{/}g;  # ignore multiple dir separators (dir//file vs dir/file)
+        if ( $path ne $tmp ) { confess("$path ne $tmp\n"); }
     }
+    close($fh) or confess("close failed: $jids_file");
 
     # ZOMBI jobs need special care, we cannot be 100% sure that the non-responsive
     # node stopped writing to network disks. Let the user decide if they can be 
     # safely ignored.
     my %zombi_warning = ();
 
+    # The jids file may contain records from very old LSF runs. For each of them `bjobs -l`
+    # is executed in _parse_bjobs_l which is expensive: record the info and clean the jid
+    # file afterwards.
+    my %no_bjobs_info = ();
+
     # Get info from bjobs -l: iterate over LSF array IDs we remember for this task in the jids_file
     for (my $i=@jids-1; $i>=0; $i--)
     {
         my $info = $self->_parse_bjobs_l($jids[$i]);
-        if ( !defined $info ) { next; }
+        if ( !defined $info ) 
+        { 
+            $no_bjobs_info{$i} = $jids[$i];   # this LSF job is not listed by bjobs
+            next; 
+        }
 
         # Check if the time limits are still OK for all running jobs. Switch queues if not
         for my $job_l (values %$info)
@@ -176,6 +190,21 @@ sub init_jobs
                 $jobs_out[$j]{lsf_id} = $lsf_id;
             }
         }
+    }
+
+    # Update the jids file, removing old LSF jobs not known to bjobs anymore.
+    # Hopefully this is safe: jobs is either pending (then must be present in
+    # the listing) or gone.
+    if ( scalar keys %no_bjobs_info )
+    {
+        open(my $fh, '>', "$jids_file.part") or confess("$jids_file.part: $!");
+        for (my $i=0; $i<@jid_lines; $i++)
+        {
+            if ( exists($no_bjobs_info{$i}) ) { next; }
+            print $fh $jid_lines[$i];
+        }
+        close($fh) or confess("close failed: $jids_file.part");
+        rename("$jids_file.part",$jids_file) or confess("rename $jids_file.part $jids_file: $!");
     }
 
     if ( scalar keys %zombi_warning )
