@@ -103,6 +103,7 @@ sub new
     $$self{_running_jobs} = {};
     $$self{_nretries} = 1;
     $$self{_verbose} = 1;
+    $$self{_maxjobs} = 100;
     $$self{usage} = 
         "Runner.pm arguments:\n" .
         "   +help                   Summary of commands\n" .
@@ -114,7 +115,7 @@ sub new
         "   +lock <file>            Exit if another instance is already running\n" .
         "   +loop <int>             Run in daemon mode with <int> seconds sleep intervals\n" .
         "   +mail <address>         Email when the runner finishes\n" .
-        "   +maxjobs <int>          Maximum number of simultaneously running jobs\n" .
+        "   +maxjobs <int>          Maximum number of simultaneously running jobs, 0 for unlimited [$$self{_maxjobs}]\n" .
         "   +nocache                When checking for finished files, do not rely on cached database and check again\n" .
         "   +reset <step>           Reset status of a failed step\n" .
         "   +retries <int>          Maximum number of retries. When negative, the runner eventually skips the task rather than exiting completely. [$$self{_nretries}]\n" .
@@ -197,7 +198,6 @@ sub run
         { 
             $$self{_maxjobs}=shift(@ARGV); 
             if ( !($$self{_maxjobs}=~/^\d+$/) ) { $self->throw("Expected integer value with +maxjobs, got \"$$self{_maxjobs}\"\n"); }
-            if ( $$self{_maxjobs}<=0 ) { $self->throw("The argument to +maxjobs must be bigger than 0, got \"$$self{_maxjobs}\"\n") }
             next; 
         }
         if ( $arg eq '+mail' ) { $$self{_mail}=shift(@ARGV); next; }
