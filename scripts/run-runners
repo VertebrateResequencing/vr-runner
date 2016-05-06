@@ -848,14 +848,13 @@ sub parse_step
 
     if ( exists($$step{config}) )
     {
-        # override defaults in step's runner config
-        for my $key (keys %{$$step{config}})
+        # override defaults in step's runner config. Originally, only keys
+        # from the step.config would be written, but that was inconvenient.
+        # Now we include all predefeined keys in the config.
+        for my $key (keys %predef)
         {
-            if ( $reserved{$key} ) { next; } # reserved keys
-            if ( exists($predef{$key}) )
-            {
-                $$step{config}{$key} = parse_config_value($predef{$key});
-            }
+            if ( $reserved{$key} ) { next; } # reserved keys: include,run
+            $$step{config}{$key} = parse_config_value($predef{$key});
         }
 
         use Data::Dumper;
