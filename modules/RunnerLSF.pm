@@ -146,15 +146,17 @@ sub init_jobs
     # file afterwards.
     my %no_bjobs_info = ();
 
+    my $bjobs_info = $self->_parse_bjobs_l();
+
     # Get info from bjobs -l: iterate over LSF array IDs we remember for this task in the jids_file
     for (my $i=@jids-1; $i>=0; $i--)
     {
-        my $info = $self->_parse_bjobs_l($jids[$i]);
-        if ( !defined $info ) 
+        if ( !exists($$bjobs_info{$jids[$i]}) ) 
         { 
             $no_bjobs_info{$i} = $jids[$i];   # this LSF job is not listed by bjobs
             next; 
         }
+        my $info = $$bjobs_info{$jids[$i]};
 
         # Check if the time limits are still OK for all running jobs. Switch queues if not
         for my $job_l (values %$info)
@@ -239,6 +241,7 @@ sub init_jobs
         if ( $jobs_out[$i]{status} & $$self{Running} || $jobs_out[$i]{status} & $$self{Error} ) { $ntodo++; }
         if ( $$self{limits}{max_jobs} && $ntodo >= $$self{limits}{max_jobs} ) { last; } 
         if ( $jobs_out[$i]{status} ne $$self{No} ) { next; }
+        if ( !exists($$ids[$i]) or !defined($$ids[$i]) ) { use Data::Dumper; warn("*** not defined?? $path, $i\n".Dumper($ids)); next; }
         my $info = $self->_parse_output($$ids[$i], $path);
         if ( defined $info )
         {
@@ -250,12 +253,12 @@ sub init_jobs
 
 sub _parse_bjobs_l
 {
-    my ($self,$jid) = @_;
+    my ($self) = @_;
 
     my @lines;
     for (my $i=0; $i<3; $i++)
     {
-        @lines = `bjobs -l $jid 2>/dev/null`;
+        @lines = `bjobs -l 2>/dev/null`;
         if ( $? ) { sleep 5; next; }
         if ( !scalar @lines ) { return undef; }
     }
@@ -269,21 +272,21 @@ sub _parse_bjobs_l
     {
         if ( $lines[$i]=~/^\s*$/ ) { next; }
 
-        my $job_info;
         if ( $lines[$i]=~/^Job <(\d+)(.*)$/ )
         {
-            # Runner's ID is $id, LSF job ID is lsf_id
-            my $id = $1;
-            my $rest = $2;
-            my $lsf_id = $id;
+            # The job id can be 6866118[2759] or 6866118
+            my $lsf_id = $1;    # the "6866118" part now or the whole lsf id "6866118[2759]" soon
+            my $job_id = $1;    # the "2759" part soon
+            my $arr_id = $1;    # the "6866118" part
+            my $rest   = $2;    # the "[2759]" part
             if ( $rest=~/^\[(\d+)/ )
             {
-                $lsf_id = "$id\[$1\]";
-                $id = $1;
+                $lsf_id = "$arr_id\[$1\]";
+                $job_id = $1;
             }
 
-            if ( scalar keys %$job) { $$info{$$job{id}} = $job; }
-            $job = { id=>$id, lsf_id=>$lsf_id, cpus=>1 };
+            if ( scalar keys %$job) { $$info{$$job{arr_id}}{$$job{job_id}} = $job; }
+            $job = { job_id=>$job_id, arr_id=>$arr_id, lsf_id=>$lsf_id, cpus=>1 };
 
             my $job_info = $lines[$i];
             chomp($job_info);
@@ -342,7 +345,7 @@ sub _parse_bjobs_l
         # Tue Mar 19 13:58:23: Resource usage collected...
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ ) 
         {
-            if ( !exists($$job{started}) ) { confess("No wall time for job $$job{id}??", @lines); }
+            if ( !exists($$job{started}) ) { confess("No wall time for job $$job{lsf_id}??", @lines); }
             my $wall_time = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch - $$job{started};
             if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $wall_time ) { $$job{cpu_time} = $wall_time; }
         }
@@ -366,7 +369,7 @@ sub _parse_bjobs_l
             # temporary failure (e.g. pid in use) of cr_restart, ignore this failure
             return $info;
         }
-        $$info{$$job{id}} = $job; 
+        $$info{$$job{arr_id}}{$$job{job_id}} = $job;
     }
     return $info;
 }
@@ -405,6 +408,7 @@ sub _check_job
 sub _get_queue
 {
     my ($self,$time) = @_;
+    $time *= 1.1;   # increase the running time by 10% to allow more time for bswitch if the queues are full
     my $queue = exists($$self{limits}{queue}) ? $$self{limits}{queue} : $$self{default_limits}{queue};
     if ( $$self{queue_limits}{$queue} >= $time ) { return $queue; }
     for my $q (sort {$$self{queue_limits}{$a} <=> $$self{queue_limits}{$b}} keys %{$$self{queue_limits}})
