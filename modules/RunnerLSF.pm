@@ -78,7 +78,7 @@ sub kill_job
 {
     my ($self,$job) = @_;
     if ( !exists($$job{lsf_id}) ) { return; }
-    my $cmd = "bkill -s7 -b '$$job{lsf_id}'";
+    my $cmd = "bkill -s KILL -b '$$job{lsf_id}'";
     warn("$cmd\n");
     `$cmd`;
 }
