@@ -334,7 +334,7 @@ sub _parse_bjobs_l
 
         # Tue Mar 19 13:00:35: [685] started on <uk10k-4-1-07>...
         # Tue Dec 24 13:12:00: [1] started on 8 Hosts/Processors <8*vr-1-1-05>...
-        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.+ started on/ ) 
+        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started on/i ) 
         {
             $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
         }
