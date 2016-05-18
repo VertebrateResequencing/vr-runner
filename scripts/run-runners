@@ -1030,6 +1030,11 @@ sub run_step
         {
             debug_msg($opts, "Running step $step_name: $cmd\n");
             my ($signal,$status,$out,$err) = cmd($opts,$cmd);
+            if ( $$opts{verbose} )
+            {
+                print @$out;
+                print STDERR @$err;
+            }
             if ( !$signal && $done{$status} )
             {
                 rename("$done_file.part",$done_file) or error("rename $done_file.part $done_file: $!");
