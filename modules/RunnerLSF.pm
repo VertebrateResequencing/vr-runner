@@ -121,7 +121,7 @@ sub init_jobs
     #   The last success counts, failures may be discarded in such a case.
     #
     open(my $fh, '<', $jids_file) or confess("$jids_file: $!");
-    my $path;
+    my $path = $job_name; $path =~ s{/+}{/}g;   # ignore multiple dir separators (dir//file vs dir/file)
     my @jids = ();
     my @jid_lines = ();
     while (my $line=<$fh>)
@@ -129,7 +129,6 @@ sub init_jobs
         push @jid_lines,$line;
         if ( !($line=~/^(\d+)\s+([^\t]*)/) ) { confess("Uh, could not parse \"$line\".\n") }
         push @jids, $1;     # LSF array ID
-        if ( !defined $path ) { $path = $2; $path =~ s{/+}{/}g; }
         my $tmp = $2;
         $tmp =~ s{/+}{/}g;  # ignore multiple dir separators (dir//file vs dir/file)
         if ( $path ne $tmp ) { confess("$path ne $tmp\n"); }
@@ -241,7 +240,6 @@ sub init_jobs
         if ( $jobs_out[$i]{status} & $$self{Running} || $jobs_out[$i]{status} & $$self{Error} ) { $ntodo++; }
         if ( $$self{limits}{max_jobs} && $ntodo >= $$self{limits}{max_jobs} ) { last; } 
         if ( $jobs_out[$i]{status} ne $$self{No} ) { next; }
-        if ( !exists($$ids[$i]) or !defined($$ids[$i]) ) { use Data::Dumper; warn("*** not defined?? $path, $i\n".Dumper($ids)); next; }
         my $info = $self->_parse_output($$ids[$i], $path);
         if ( defined $info )
         {
