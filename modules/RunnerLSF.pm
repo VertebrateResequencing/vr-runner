@@ -531,6 +531,7 @@ sub _create_bsub_opts_string
 
     $bsub_opts  = sprintf " -M%d -R 'select[type==X86_64 && mem>%d] rusage[mem=%d]'", $lmem,$mem,$mem; 
     $bsub_opts .= " -q $queue";
+    $bsub_opts .=  exists($$self{limits}{custom}) ? ' '.$$self{limits}{custom} : '';    # custom options, such as -R avx
     if ( defined($$self{limits}{cpus}) ) 
     {
         $bsub_opts .= " -n $$self{limits}{cpus} -R 'span[hosts=1]'";
