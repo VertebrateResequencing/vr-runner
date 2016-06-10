@@ -162,7 +162,8 @@ sub main
         my $merged = $self->Runner::Chunk::merge_samples(
                     files   => \@dst_files,
                     dir     => "$outdir/merged",
-                    size_bp => $$self{max_size_Mb}*1e6
+                    size_bp => $$self{max_size_Mb}*1e6,
+                    bcftools => $$self{bcftools}
                 );
         @dst_files = @$merged;
 
@@ -183,6 +184,7 @@ sub main
             my $concat = $self->Runner::Chunk::concat(
                         files => \@concat,
                         dir   => "$outdir/concat",
+                        bcftools => $$self{bcftools}
                     );
             @dst_files = @$concat;
         }
