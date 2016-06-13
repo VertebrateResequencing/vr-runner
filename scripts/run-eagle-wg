@@ -1,0 +1,391 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{max_chr_len}    = 2147483647;
+    $$self{verbose}        = 1;
+    $$self{do_clean}       = 1;
+    $$self{limits}         = { memory=>5_500, runtime=>3*24*60 };
+    $$self{eagle}          = 'eagle';
+    $$self{bcftools}       = 'bcftools';
+    $$self{vcf_ref}        = 'resources/refs/imputation/1000g-phase3/vcf/1000GP_Phase3_chr{CHROM}.bcf';
+    $$self{gen_map}        = 'resources/refs/imputation/genetic-map/genetic_map_chr{CHROM}_combined_b37.txt';
+    $$self{concat_args}    = '--compact-PS';
+    $$self{config_version} = '1426364865';
+    $$self{_sampleconf} = q[
+        # For sanity checking that your config file is not obsolete. Update the version key in your 
+        #  config file to get rid of the warnings.
+        version  => '] .$$self{config_version}. q[',
+
+        eagle         => '] .$$self{eagle}. q[',
+        bcftools      => '] .$$self{bcftools}. q[',
+        concat_args   => '] .$$self{concat_args}. q[',
+        gen_map       => '] .$$self{gen_map}. q[',
+        vcf_ref       => '] .$$self{vcf_ref}. q[',
+
+
+        # Number of sites per chunk and in buffer regions. The total number of
+        #   sites considered is buffer_nsites+chunk_nsites.  The chunks are
+        #   determined based on the input VCF (-i) unless chunk_by_ref is set.
+        buffer_nsites  => 10_000,
+        chunk_nsites   => 100_000,
+
+        # Regions to impute, the chunks must be sorted by chromosomal position
+        #   or else the resulting VCF will not be sorted. By default, the whole
+        #   input VCF is imputed.
+        # region => [ '1:159000000-161000000', '1:62000000-64000000', '2' ],
+
+        # Limits for shapeit and the other tasks
+        # limits       => { memory=>5_500, runtime=>3*24*60 },
+
+        do_clean => 1,   # Remove runner's temporary files
+    ]."\n";
+
+    $$self{usage} .= 
+        "Usage: run-eagle-wg [OPTIONS]\n" .
+        "Options:\n" .
+        "   -i, --in-vcf <file>                 The target VCF file to be phased\n" .
+        "   -m, --mrProper                      Clean all intermediate files, including Impute2 output files, leaving only top-level VCFs\n" .
+        "   -o, --outdir <dir>                  Output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-m' or $arg eq '--mrProper' ) { $$self{mrProper}=1; next; }
+        if ( $arg eq '-i' or $arg eq '--in-vcf' ) { $$self{in_vcf}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{in_vcf}) ) { $self->throw("Expected the -i option.\n"); }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option.\n"); }
+    $$self{chunk_file} = "$$self{outdir}/chunks.txt";
+    if ( $$self{mrProper} )
+    {
+        $self->mrProper($$self{outdir});
+        $self->all_done;
+    }
+    if ( !exists($$self{version}) or $$self{version} ne $$self{config_version} )
+    {
+        $self->warn("Warning: Your config file may be out of date, the latest version key is \"$$self{config_version}\". Please run with +sampleconf to see what changed.\n");
+    }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    $self->save_config("eagle-wg.conf");
+
+    my $outdir = $$self{outdir};
+
+    my $chunks = $self->read_chunks();
+
+    $self->set_limits(%{$$self{shapeit_limits}}) unless !exists($$self{shapeit_limits});
+    for my $chunk (@$chunks)
+    {
+        my $outfile = "$outdir/eagle/$$chunk[0]/$$chunk[0]-$$chunk[1]-$$chunk[2].bcf";
+        my %args =
+        (
+            chr => $$chunk[0],
+            beg => $$chunk[1],
+            end => $$chunk[2],
+        );
+        $self->spawn('run_eagle',$outfile,%args);
+    }
+    $self->wait;
+    $self->set_limits(memory=>undef,runtime=>undef);
+    $self->cmd(qq[touch $outdir/02.shapeit.done]);
+
+    $self->set_limits(runtime=>24*60, %{$$self{limits}}) unless !exists($$self{limits});
+    my @chroms = $self->get_chroms($chunks);
+    for my $chr (@chroms)
+    {
+        if ( $self->is_finished("$outdir/$chr.bcf") ) { next; }
+        $self->spawn('concat_vcfs',"$outdir/$chr.bcf",$chunks,$chr);
+    }
+    $self->wait;
+    $self->set_limits(memory=>undef,runtime=>undef);
+
+    # Run performance stats and clean
+    $self->spawn('runtime_stats',"$outdir/runtime");
+    $self->wait;
+    $self->clean($outdir) unless !$$self{do_clean};
+
+    $self->all_done;
+}
+
+sub mrProper
+{
+    my ($self,$outdir) = @_;
+    my $chunks = $self->read_chunks();
+    my %chroms = ();
+    for my $chunk (@$chunks) { $chroms{$$chunk[0]} = 1; }
+    for my $chr (keys %chroms)
+    {
+        $self->cmd("rm -rf $outdir/$chr");
+    }
+    $self->SUPER::clean($outdir);
+}
+
+sub runtime_stats
+{
+    my ($self,$outfile) = @_;
+    $self->cmd("mkdir -p $outfile.part");
+    $self->cmd("runtime-stats $$self{outdir} -p $outfile.part/graph > $outfile.part/stats.txt");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+sub save_config
+{
+    my ($self,$name) = @_;
+    my $src = $$self{_config} ? $$self{_config} : undef;
+    my $dst = "$$self{outdir}/$name";
+    if ( -e $dst && (!defined($src) or (stat($src))[9] <= (stat($dst))[9]) ) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    if ( defined $src ) { $self->cmd("cat $src >> $dst"); }
+}
+
+sub has_region
+{
+    my ($self,$vcf,$region) = @_;
+    my $file = $self->expand_chrom($vcf,$region);
+    if ( !-e $file ) { return 0; }
+    if ( $file ne $vcf ) { return 1; }  # expanded template
+
+    # potentially multiple chromosomes in the file
+    my $cmd = "$$self{bcftools} query -r $region -f'%CHROM\\t%POS\\n' $file";
+    print STDERR "$cmd\n";
+    open(my $fh,"$cmd |") or $self->throw("$cmd: $!");
+    while (my $line=<$fh>)
+    {
+        close($fh);
+        return 1;
+    }
+    close($fh);
+    return 0;
+}
+
+sub read_chunks
+{
+    my ($self) = @_;
+    if ( !-e $$self{chunk_file} ) 
+    { 
+        my $in_file = $$self{in_vcf};
+        my @regions = $self->get_regions($in_file);
+        for my $region (@regions)
+        {
+            if ( !$self->has_region($$self{in_vcf},$region) ) { next; }
+            $self->spawn('define_chunks',"$$self{chunk_file}.$region",$in_file,$region);
+        }
+        $self->wait;
+
+        $self->cmd("> $$self{chunk_file}.part");
+        for my $region (@regions)
+        {
+            if ( !$self->has_region($$self{in_vcf},$region) ) { next; }
+            $self->cmd("cat $$self{chunk_file}.$region >> $$self{chunk_file}.part");
+        }
+        rename("$$self{chunk_file}.part",$$self{chunk_file}) or $self->throw("rename $$self{chunk_file}.part $$self{chunk_file}: $!");
+        for my $region (@regions)
+        {
+            unlink("$$self{chunk_file}.$region");
+        }
+    }
+    open(my $fh,'<',$$self{chunk_file}) or $self->throw("$$self{chunk_file}: $!");
+    my @chunks;
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        my @items = split(/\t/,$line);
+        push @chunks, [@items];
+    }
+    close($fh) or $self->throw("$$self{chunk_file}: $!");
+    return \@chunks;
+}
+
+sub define_chunks
+{
+    my ($self,$outfile,$in_file,$region) = @_;
+    my $tot_sites = $$self{buffer_nsites} + $$self{chunk_nsites};
+    my (@chunks,@buffer);
+    my $file = $self->expand_chrom($in_file,$region);
+    if ( $region eq '.' ) { $region = ''; }
+    if ( $region ) { $region = "-r $region"; }
+    my $cmd  = "$$self{bcftools} query -f'%CHROM\\t%POS\\n' $file $region |";
+    print STDERR "$cmd\n";
+    open(my $in,$cmd) or $self->throw("$cmd: $!");
+    while (my $line=<$in>)
+    {
+        my ($chr,$pos) = split(/\t/,$line);
+        chomp($pos);
+        if ( @buffer && $buffer[0][0] ne $chr or @buffer>$tot_sites )
+        {
+            my $chr_from = $buffer[0][0];
+            my $pos_from = $buffer[0][1];
+            my $pos_to   = $buffer[-1][1];
+            my $nout     = @buffer;
+            push @chunks, { chr=>$chr_from, from=>$pos_from, to=>$pos_to, n=>$nout };
+            if ( $$self{chunk_nsites}<@buffer ) { splice(@buffer,0,$$self{chunk_nsites}); }
+            else { @buffer = (); }
+        }
+        push @buffer, [$chr,$pos];
+    }
+    if ( @buffer )
+    {
+        my $chr_from = $buffer[0][0];
+        my $pos_from = $buffer[0][1];
+        my $pos_to   = $buffer[-1][1];
+        my $nout     = @buffer;
+        push @chunks, { chr=>$chr_from, from=>$pos_from, to=>$pos_to, n=>$nout };
+    }
+    close($in) or $self->throw("close $cmd");
+    if ( !@chunks ) { $self->throw("No chunks defined: $cmd\n"); }
+    if ( @chunks>1 && $chunks[-1]{n} < $tot_sites*0.75 && $chunks[-1]{chr} eq $chunks[-2]{chr} )
+    {
+        my $chunk = splice(@chunks,-1,1);
+        $chunks[-1]{to} = $$chunk{to};
+        $chunks[-1]{n} += $$chunk{n};
+    }
+
+    if ( !($region=~/:/) )
+    {
+        # Whole genome or whole chromosome was requested. When on a new
+        # chromosome, expand the first and last record to accompany
+        # sites which may be present only in one (known_vcf vs in_vcf)
+        for (my $i=0; $i<@chunks; $i++)
+        {
+            if ( $i==0 ) { $chunks[0]{from} = 0; next; }
+            if ( $chunks[$i]{chr} ne $chunks[$i-1]{chr} )
+            {
+                $chunks[$i-1]{to} = $$self{max_chr_len}; # last chunk, longest chr of human genome
+                $chunks[$i]{from} = 0;
+            }
+        }
+        $chunks[-1]{to} = $$self{max_chr_len};
+    }
+
+    open(my $out,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    for my $chunk (@chunks)
+    {
+        print $out "$$chunk{chr}\t$$chunk{from}\t$$chunk{to}\t$$chunk{n}\n";
+    }
+    close($out) or $self->throw("close $outfile.part");
+    rename("$outfile.part",$outfile);
+}
+
+sub get_chroms
+{
+    my ($self,$regions) = @_;
+    my %chroms;
+    for my $reg (@$regions) 
+    { 
+        $chroms{$$reg[0]} = 1; 
+    }
+    return ( sort keys %chroms );
+}
+sub expand_chrom
+{
+    my ($self,$path,$region) = @_;
+    if ( !defined $region ) { return $path; }
+    $region =~ s/:.*$//;
+    $path =~ s/{CHROM}/$region/g;
+    return $path;
+}
+
+sub get_regions
+{
+    my ($self,$path) = @_;
+    if ( exists($$self{region}) ) { return @{$$self{region}}; }
+    if ( !($path=~/{CHROM}/) ) 
+    { 
+        my @chrs = grep { s/\s+.*$// && chomp } $self->cmd("$$self{bcftools} index -s $path");
+        return @chrs;
+    }
+    my $before = $`;
+    my $after  = $';
+    $path =~ s/{CHROM}/*/;  # only one occurance of {CHROM} is allowed in this implementation
+    my @list = glob($path);
+    if ( !@list ) { $self->throw("No such file(s): $path"); }
+    my @regs;
+    for my $file (@list)
+    {
+        $file =~ s{^$before}{};
+        $file =~ s{$after$}{};
+        push @regs,$file;
+    }
+    return @regs;
+}
+sub run_eagle
+{
+    my ($self,$outfile,%args) = @_;
+
+    my $vcf_ref = $self->expand_chrom($$self{vcf_ref},$args{chr});
+    if ( ! -e $vcf_ref ) { $self->throw("No such file: $vcf_ref .. [$$self{vcf_ref},$args{chr}]\n"); }
+
+    my $gen_map = $self->expand_chrom($$self{gen_map},$args{chr});
+    if ( ! -e $gen_map ) { $self->throw("No such file: $gen_map .. [$$self{gen_map},$args{chr}]\n"); }
+
+    my $vcf_in = $self->expand_chrom($$self{in_vcf},$args{chr});
+    if ( ! -e $vcf_in ) { $self->throw("No such file: $vcf_in .. [$$self{in_vcf},$args{chr}]\n"); }
+
+    my $cmd = "$$self{eagle} --chrom $args{chr} --bpStart $args{beg} --bpEnd $args{end} --vcfRef $vcf_ref --vcfTarget $vcf_in --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part > $outfile.log";
+    $self->cmd($cmd);
+
+    $self->cmd("bcftools index -f $outfile.part.bcf");
+    rename("$outfile.part.bcf.csi","$outfile.csi") or $self->throw("rename $outfile.part.bcf.csi $outfile.csi: $!");
+    rename("$outfile.part.bcf",$outfile) or $self->throw("rename $outfile.part.bcf $outfile: $!");
+}
+sub concat_vcfs
+{
+    my ($self,$outfile,$chunks,$chr) = @_;
+    open(my $fh,'>',"$outfile.list") or $self->throw("$outfile.list: $!");
+    for my $chunk (@$chunks)
+    {
+        if ( $$chunk[0] ne $chr ) { next; }
+        my $file = "$$self{outdir}/eagle/$$chunk[0]/$$chunk[0]-$$chunk[1]-$$chunk[2].bcf";
+        print $fh $file, "\n";
+    }
+    close($fh);
+    $self->cmd(qq[$$self{bcftools} concat $$self{concat_args} -lf $outfile.list -Ob -o $outfile.gts.bcf]);
+    $self->cmd(qq[$$self{bcftools} index $outfile.gts.bcf]);
+    my $in_vcf = $self->expand_chrom($$self{in_vcf},$chr);
+    $self->cmd(qq[$$self{bcftools} annotate -c -FMT/GT -r $chr -a $outfile.gts.bcf $in_vcf -Ob -o $outfile.part]);
+    $self->cmd(qq[$$self{bcftools} index $outfile.part]);
+    rename("$outfile.part.csi","$outfile.csi") or $self->throw("rename $outfile.part.csi $outfile.csi: $!");
+    unlink("$outfile.gts.bcf");
+    unlink("$outfile.gts.bcf.csi");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
