@@ -49,6 +49,7 @@ sub error
         "   -l, --loop <int>          run in daemon mode, check the status every <int> seconds\n",
         "   -L, --lock <file>         exit if another instance is already running\n",
         "   -n, --nmax <int>          maximum number of projects to run simultaneously\n",
+        "   -s, --setup <file>        run directly\n",
         "   -u, --usage               print detailed usage explanation\n",
         "   -v, --verbose             increase verbosity by giving multiple times\n",
         "   -h, -?, --help            this help message\n",
@@ -64,6 +65,7 @@ sub parse_params
     my $opts = { };
     while (defined(my $arg=shift(@ARGV)))
     {
+        if ( $arg eq '-s' || $arg eq '--setup' ) { $$opts{run_setup}=shift(@ARGV); next; }
         if ( $arg eq '-u' || $arg eq '--usage' ) { detailed_usage(); exit; }
         if ( $arg eq '-a' || $arg eq '--admin' ) { $$opts{admin_email}=shift(@ARGV); next }
         if ( $arg eq '-d' || $arg eq '--dropbox' ) { $$opts{dropbox}=shift(@ARGV); next }
@@ -84,6 +86,7 @@ sub parse_params
     $$opts{dropbox_conf} = "$$opts{dropbox}.conf";
     $$opts{dropbox_html} = "$$opts{dropbox}.html";
 
+    if ( exists($$opts{run_setup}) ) { setup_on_the_fly($opts); }
     if ( !-d $$opts{dropbox_conf} ) { error("Incorrect dropbox prefix, the directory not found: $$opts{dropbox_conf}\n\n"); }
     if ( !-e $$opts{dropbox_in} ) { `mkdir -p $$opts{dropbox_in}`; }
     if ( !-e $$opts{dropbox_out} ) { `mkdir -p $$opts{dropbox_out}`; }
@@ -91,6 +94,51 @@ sub parse_params
     if ( !exists($$opts{err_period}) ) { $$opts{err_period} = 60; }
 
     return $opts;
+}
+
+sub setup_on_the_fly
+{
+    my ($opts) = @_;
+
+    my $dropbox_dir = $$opts{dropbox};
+    $$opts{dropbox}      = "$$opts{dropbox}/dropbox";
+    $$opts{dropbox_tmp}  = "$$opts{dropbox}.tmp";
+    $$opts{dropbox_in}   = "$$opts{dropbox}.in";
+    $$opts{dropbox_out}  = "$$opts{dropbox}.out";
+    $$opts{dropbox_conf} = "$$opts{dropbox}.conf";
+    $$opts{dropbox_html} = "$$opts{dropbox}.html";
+
+    my $name = $$opts{run_setup};
+    if ( $name =~ m{^.+/} ) { $name = $'; }
+    if ( -e "$$opts{dropbox_in}/$name") { return; }
+    if ( scalar glob("$$opts{dropbox_tmp}/*_$name") ) { return; }
+    if ( scalar glob("$$opts{dropbox_out}/*_$name") ) { return; }
+
+    open(my $fh,'<',$$opts{run_setup}) or error("$$opts{run_setup}: $!");
+    my $conf_dir = undef;
+    my @setup    = ();
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/^.config:\s*(\S+)$/ ) 
+        { 
+            my $chain = $1;
+            if ( $chain=~m{^.+/} ) 
+            { 
+                $conf_dir = $&; 
+                $line  = ".config: $'\n";
+            }
+        }
+        push @setup, $line;
+    }
+    close($fh) or error("close failed: $$opts{run_setup}");
+
+    `mkdir -p $dropbox_dir`;
+    if ( defined $conf_dir ) { cmd($opts,"cd $dropbox_dir && ln -s $conf_dir dropbox.conf"); }
+
+    `mkdir -p $$opts{dropbox_in}`;
+    open($fh,'>',"$$opts{dropbox_in}/$name") or error("$$opts{dropbox_in}/$name: $!");
+    print $fh join('',@setup);
+    close($fh) or error("close failed: $$opts{dropbox_in}/$name");
 }
 
 sub detailed_usage
@@ -506,7 +554,7 @@ sub update_html_report
                     </div>
             ];
             $div_id++;
-            print $fh "<td>$$project{email}";
+            print $fh "<td>".(exists($$project{email})?$$project{email}:'');
             for my $step (@steps_brief) { print $fh $step; }
 
         }
