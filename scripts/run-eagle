@@ -278,6 +278,30 @@ sub run_eagle
     my $gen_map = $self->expand_chrom($$self{gen_map},$args{region});
     if ( ! -e $gen_map ) { $self->throw("No such file: $gen_map .. [$$self{gen_map},$args{region}]\n"); }
 
+    # Check if the memory limit (if set) is sufficient. If not, exit immediately so that CPU time is not wasted
+    my $mem = $self->get_limits('memory');
+    if ( defined $mem )
+    {
+        my @tmp = $self->cmd("$$self{bcftools} query -l $vcf_ref | wc -l");
+        chomp($tmp[0]);
+        my $nsmpl  = $tmp[0];
+        my $nsites = 0;
+
+        @tmp = $self->cmd("$$self{bcftools} +counts -r $args{region} $args{vcf}");
+        for my $line (@tmp)
+        {
+            if ( $line=~/^Number of samples:\s+(\d+)/ ) { $nsmpl += $1; next; }
+            if ( $line=~/^Number of sites:\s+(\d+)/ ) { $nsites = $1; last; }
+        }
+        my $exp_mem = int(3 * $nsites * $nsmpl / 1e6) + 1e3;     # MB
+
+        if ( $mem < $exp_mem )
+        {
+            $self->set_limits(memory=>$exp_mem);
+            $self->throw("Increasing the memory limit for the next run to $exp_mem, the previously requested limit seems too low: $mem\n");
+        }
+    }
+
     my $cmd = "$$self{eagle} --chrom $args{region} --vcfRef $vcf_ref --vcfTarget $args{vcf} --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part > $outfile.log";
     $self->cmd($cmd);
 
