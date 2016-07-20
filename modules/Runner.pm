@@ -1104,6 +1104,8 @@ sub _revive
         if ( $@ ) { $self->throw("do $config_file: $@\n"); }
 		while (my ($key,$value) = each %x) { $$self{$key} = $value; }
 	}
+    $$self{_revived_file} = $freeze_file;
+
     my $code = $self->can($$self{_store}{call});
     &$code($self,@{$$self{_store}{args}});
 
