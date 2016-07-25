@@ -918,7 +918,6 @@ sub wait
             if ( $must_run )
             { 
                 if ( $$self{_maxjobs} && $$self{_maxjobs}<$is_running ) { last; }
-                $self->_update_limits($wfile, $ids[$i]);
                 next; 
             }
 
@@ -938,6 +937,12 @@ sub wait
             if ( $$self{_maxjobs} < $is_running + @ids ) { splice(@ids, $$self{_maxjobs} - $is_running - @ids); }
         }
         $is_running += scalar @ids;
+
+        # Update limits as requested by the user module, as opposed to job scheduler
+        for my $id (@ids)
+        {
+            $self->_update_limits($wfile, $id);
+        }
 
         $$self{_store} = $$jobs{$wfile};
         my $rfile = $self->freeze($wfile);
