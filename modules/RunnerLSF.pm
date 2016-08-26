@@ -303,6 +303,8 @@ sub _parse_bjobs_l
             if ( !($job_info=~/,\s*Command <([^>]+)>/) ) { confess("Could not determine the command: [$job_info]"); }
             $$job{command} = $1;
         }
+
+        if ( !defined $job ) { next; }
         
         # Collect also checkpoint data for LSFCR to avoid code duplication: checkpoint directory, memory, status
         # Wed Mar 19 10:14:17: Submitted from host <vr-2-2-02>...
@@ -310,13 +312,12 @@ sub _parse_bjobs_l
         {
             my $job_info = $lines[$i];
             chomp($job_info);
-            $i++;
 
-            while ( $i<@lines && $lines[$i]=~/^\s{21}?(.*)$/ )
+            while ( ($i+1)<@lines && $lines[$i+1]=~/^\s{21}?(.*)$/ )
             {
+                $i++;
                 $job_info .= $1;
                 chomp($job_info);
-                $i++;
             }
             if ( $job_info=~/,\s*Checkpoint directory <([^>]+)>/ ) { $$job{chkpnt_dir} = $1; }
             if ( $job_info=~/\srusage\[mem=(\d+)/ ) 
