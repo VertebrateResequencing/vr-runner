@@ -1,0 +1,228 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{bcftools} = 'bcftools';
+    $$self{samtools} = 'samtools';
+    $$self{mpileup}  = 'bcftools mpileup';
+    $$self{call}     = 'bcftools call -m -P0.01';
+    $$self{gtcheck}  = 'bcftools gtcheck -c 0.04,-0.05 -G1';
+
+    $$self{verbose} = 1;
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+        # For sanity checking that your config file is not obsolete. Update the version key in your 
+        #  config file to get rid of the warnings.
+        version  => '] .$$self{config_version}. q[',
+        
+        samtools => '] .$$self{samtools}.  q[',
+        bcftools => '] .$$self{bcftools}.  q[',
+        mpileup  => '] .$$self{mpileup}.   q[',
+        call     => '] .$$self{call}.      q[',
+        gtcheck  => '] .$$self{gtcheck}.   q[',
+
+        fa_ref   => undef,  # required
+        region   => undef,  # optional argument to mpileup, e.g. '-r chr1'
+        sites    => undef,  # optional argument to mpileup, e.g. '-l sites.vcf.gz'
+
+    ]."\n";
+
+
+    $$self{usage} .= 
+        "About: Takes a list of lanelet alignments, groups them by sample and runs gtcheck.\n" .
+        "       In each group two lanelets from a single different sample are included in\n" .
+        "       order to establish a baseline for ERR of identical vs different samples.\n" .
+        "Usage: run-gtcheck-lanelets\n" .
+        "Options:\n" .
+        "   -f, --fasta-ref <file>      Fasta reference\n" .
+        "   -i, --input-files <list>    List of input files\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "   -s, --sites <file>          Restrict calling to these sites\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-i' or $arg eq '--input-files' ) { $$self{input_files}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fasta-ref' ) { $$self{fa_ref}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--sites' ) { $$self{sites}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !exists($$self{input_files}) ) { $self->throw("Expected the -i option."); }
+    if ( !exists($$self{fa_ref}) ) { $self->throw("Expected the -f option or fa_ref config key."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    $self->save_config("gtcheck.conf");
+
+    my $outdir = $$self{outdir};
+    $self->spawn('bam2groups',"$outdir/groups.txt",$$self{input_files});
+    $self->wait;
+
+    my $groups = $self->parse_file_list();
+    for my $smpl (keys $groups)
+    {
+        for my $lane (@{$$groups{$smpl}{lanes}})
+        {
+            $self->spawn('call_variants',$$lane{bcf},$$lane{bam});
+        }
+    }
+    $self->wait;
+
+    for my $smpl (keys $groups)
+    {
+        $self->spawn('gtcheck',"$outdir/gtcheck/$smpl",$smpl,$$groups{$smpl});
+    }
+    $self->wait;
+
+    $self->all_done;
+}
+
+sub save_config
+{
+    my ($self,$name) = @_;
+    my $src = $$self{_config} ? $$self{_config} : undef;
+    my $dst = "$$self{outdir}/$name";
+    if ( -e $dst && (!defined($src) or (stat($src))[9] <= (stat($dst))[9]) ) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    if ( defined $src ) { $self->cmd("cat $src >> $dst"); }
+}
+
+sub bam2groups
+{
+    my ($self,$outfile,$bams) = @_;
+    my @bams = ();
+    open(my $fh,'<',$bams) or $self->throw("$bams: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/^#/ ) { next; }
+        $line =~ s/^\s*//;
+        $line =~ s/\s*$//;
+        chomp($line);
+        if ( ! -e $line ) { $self->throw("No such file: $line"); }
+        push @bams,$line;
+    }
+    close($fh) or $self->throw("close failed: $bams");
+
+    open($fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    for my $bam (@bams)
+    {
+        my @hdr  = $self->cmd("$$self{samtools} view -H $bam");
+        my $smpl = {};
+        for my $line (@hdr)
+        {
+            if ( !($line=~/^\@RG/) ) { next; }
+            if ( !($line =~ /SM:(\S+)\s+/) ) { next; }
+            $$smpl{$1} = 1;
+        }
+        if ( scalar keys %$smpl > 1 ) { $self->throw("Expected one sample in $bam, found more: ".join(',',keys %$smpl)); }
+        print $fh "$bam\t".(keys %$smpl)[0]."\n";
+    }
+    close($fh) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub parse_file_list
+{
+    my ($self) = @_;
+
+    my %groups = ();
+    open(my $fh,'<',"$$self{outdir}/groups.txt") or $self->throw("$$self{outdir}/groups.txt: $!");
+    while (my $line=<$fh>)
+    {
+        my ($file,$smpl) = split(/\t/,$line);
+        chomp($smpl);
+
+        my $id = exists($groups{$smpl}) ? @{$groups{$smpl}{lanes}} : 0;
+        push @{$groups{$smpl}{lanes}}, { bam=>$file, bcf=>"$$self{outdir}/bcfs/$smpl/$id.bcf" };
+    }
+    close($fh) or $self->throw("$$self{outdir}/groups.txt: close failed");
+
+    # select a control lane to create a contrast for gtcheck's clustering
+    my @samples = keys %groups;
+    if ( scalar @samples == 1 ) { $self->throw("One sample only: todo"); }
+    for (my $i=0; $i<@samples; $i++)
+    {
+        my $j = $i+1 < @samples ? $i+1 : 0;
+        if ( @{$groups{$samples[$j]}{lanes}} < 2 ) { $self->throw("One lanelet only in $samples[$j]}{lanes}[0]{bam}: todo"); }
+        $groups{$samples[$i]}{ctrl} = 
+        [
+            $groups{$samples[$j]}{lanes}[0]{bcf},
+            $groups{$samples[$j]}{lanes}[1]{bcf},
+        ];
+    }
+
+    return \%groups;
+}
+
+sub call_variants
+{
+    my ($self,$outfile,$bam) = @_;
+    my $sites  = defined $$self{sites} ? $$self{sites} : '';
+    my $region = defined $$self{region} ? $$self{region} : '';
+    $self->cmd("$$self{mpileup} -f $$self{fa_ref} $sites $region -Ou $bam | $$self{call} -Ob -o $outfile.part");
+    $self->cmd("$$self{bcftools} index $outfile.part");
+    rename("$outfile.part.csi","$outfile.csi") or $self->throw("rename $outfile.part.csi $outfile.csi: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub gtcheck
+{
+    my ($self,$outfile,$smpl,$list) = @_;
+
+    $self->cmd("mkdir -p $outfile.part");
+    open(my $fh,'>',"$outfile.part/bcf.list") or $self->throw("$outfile.part/bcf.list: $!");
+    for my $lane (@{$$list{lanes}})
+    {
+        print $fh $$lane{bcf}."\n";
+    }
+    print $fh join("\n",@{$$list{ctrl}})."\n";
+    close($fh) or $self->throw("close failed: $outfile.part/bcf.list");
+
+    my $region = defined $$self{region} ? $$self{region} : '';
+    $self->cmd("$$self{bcftools} merge -l $outfile.part/bcf.list --force-samples $region -Ou | $$self{bcftools} view -v snps -Ob -o $outfile.part/merged.bcf");
+    $self->cmd("cd $outfile.part && $$self{gtcheck} merged.bcf > gtcheck.txt");
+    $self->cmd("cd $outfile.part && cat gtcheck.txt | grep ^DOT | cut -f2- | dot -Tsvg -o graph.svg");
+
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+
+

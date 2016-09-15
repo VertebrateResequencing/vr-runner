@@ -47,7 +47,7 @@ sub new
             # to a template bam header with M5 in @SQ lines
             fa_ref_md5   => undef,
 
-            # include only reads that will be used by mpileup
+            # include only reads that will be used by mpileup   .. consider also SUPPLEMENTARY
             filter => 'UNMAP,SECONDARY,QCFAIL,DUP',
 
             # minimum percentage of mapped bases
@@ -130,8 +130,8 @@ sub main
     my @files = $self->list_files($$self{bams});
     for my $file (@files)
     {
-        $self->spawn('bam_stats',"$$self{outdir}/$$file{prefix}.stats",$file);
-        $self->spawn('determine_sex',"$$self{outdir}/$$file{prefix}.sex",$$file{bam});
+        $self->spawn('bam_stats',"$$self{outdir}/stats/$$file{prefix}.stats",$file);
+        $self->spawn('determine_sex',"$$self{outdir}/stats/$$file{prefix}.sex",$file);
     }
     $self->wait;
 
@@ -262,7 +262,7 @@ sub bam_stats
         $filter = "-F $out[0]";
     }
 
-    my $bchk = "$$self{outdir}/$$dat{prefix}.bchk";
+    my $bchk = "$$self{outdir}/stats/$$dat{prefix}.bchk";
     if ( !$self->is_finished("$bchk.bchk") )
     {
         if ( -e "$$dat{bam}.bchk" ) 
@@ -281,9 +281,24 @@ sub bam_stats
     rename("$outdir.part",$outdir) or $self->throw("rename $outdir.part $outdir: $!");
 }
 
+sub sample_name
+{
+    my ($self,$bam) = @_;
+    my %smpl = ();
+    open(my $fh,"$$self{samtools} view -H $bam |") or $self->throw("$$self{samtools} view -H $bam: $!");
+    while (my $line=<$fh>)
+    {
+        if ( !($line=~/^\@RG/) ) { next; }
+        if ( $line=~/SM:(\S+)/ ) { $smpl{$1} = 1; }
+    }
+    close($fh) or $self->throw("$$self{samtools} view -H $bam: close failed");
+    if ( !scalar keys %smpl ) { return $bam; }
+    return join(',',keys %smpl);
+}
+
 sub determine_sex
 {
-    my ($self,$outfile,$bam) = @_;
+    my ($self,$outfile,$dat) = @_;
 
     my $sex  = '?';
     my $num1 = 0;
@@ -299,10 +314,12 @@ sub determine_sex
     if ( !($expr=~/\{([a-zA-Z0-9_.:]+)\}/) ) { $self->throw("Could not determine first region in $$self{sex}\n"); }
     my $reg2 = $1;
 
-    $self->cmd("$$self{samtools} stats $bam $reg1 > $bam.bchk.$reg1");
-    $self->cmd("$$self{samtools} stats $bam $reg2 > $bam.bchk.$reg2");
-    my $stats1 = $self->parse_bam_stats("$bam.bchk.$reg1");
-    my $stats2 = $self->parse_bam_stats("$bam.bchk.$reg2");
+    my $bam  = $$dat{bam};
+    my $bchk = "$$self{outdir}/$$dat{prefix}.bchk";
+    $self->cmd("$$self{samtools} stats $bam $reg1 > $bchk.$reg1");
+    $self->cmd("$$self{samtools} stats $bam $reg2 > $bchk.$reg2");
+    my $stats1 = $self->parse_bam_stats("$bchk.$reg1");
+    my $stats2 = $self->parse_bam_stats("$bchk.$reg2");
     $num1 = $$stats1{mapped_reads};
     $num2 = $$stats2{mapped_reads};
 
@@ -313,8 +330,9 @@ sub determine_sex
     if ( $@ ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
 
 sex_done:
+    my $smpl = $self->sample_name($bam);
     open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
-    print $fh "$sex\t$num1\t$num2\n";
+    print $fh "$bam\t$smpl\t$sex\t$num1\t$num2\n";
     close($fh) or $self->throw("close failed: $outfile.part");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }   
@@ -327,8 +345,8 @@ sub create_stats
     $self->write_header($fh,$txt);
     for my $file (@$files)
     {
-        my $stats = $self->parse_bam_stats("$$self{outdir}/$$file{prefix}.bchk");
-        my $sex   = $self->parse_sex_stats("$$self{outdir}/$$file{prefix}.sex");
+        my $stats = $self->parse_bam_stats("$$self{outdir}/stats/$$file{prefix}.bchk");
+        my $sex   = $self->parse_sex_stats("$$self{outdir}/stats/$$file{prefix}.sex");
         $self->write_stats($fh,$txt,$file,{%$stats,%$sex});
     }
     $self->write_footer($fh);
@@ -358,9 +376,9 @@ sub parse_sex_stats
     open(my $fh,'<',$fname) or $self->throw("$fname: $!");
     my $line = <$fh>;
     chomp($line);
-    my ($sex,$n22,$nY) = split(/\s+/,$line);
+    my ($bam,$name,$sex,$n1,$n2) = split(/\s+/,$line);
     close($fh) or $self->throw("close failed: $fname");
-    return { sex=>$sex, n22=>$n22, nY=>$nY };
+    return { name=>$name, sex=>$sex, n1=>$n1, n2=>$n2 };
 }
 
 sub parse_bam_stats
@@ -370,6 +388,7 @@ sub parse_bam_stats
     my @insert_size_lines = ();
     my @indel_dist_lines = ();
     my @indel_per_cycle_lines = ();
+    my ($cov_sum,$cov_n);
     open(my $fh,'<',$file) or $self->throw("$file: $!");
     while (my $line=<$fh>)
     {
@@ -393,6 +412,13 @@ sub parse_bam_stats
         {
             push @indel_dist_lines,$line;
         }
+        elsif ( $line=~/^COV/ )
+        {
+            my @items = split(/\t/,$line);
+            chomp($items[-1]);
+            $cov_sum += $items[2]*$items[3];    # 2:depth-bin, 3:number of reads
+            $cov_n += $items[3];
+        }
         elsif ( $line=~/^IC/ )
         {
             push @indel_per_cycle_lines,$line;
@@ -408,6 +434,7 @@ sub parse_bam_stats
     $self->calc_insert_size_stats(\%stats,\@insert_size_lines);
     $self->calc_indel_ratio_stats(\%stats,\@indel_dist_lines);
     $self->calc_indel_per_cycle_stats(\%stats,\@indel_per_cycle_lines);
+    $stats{avg_depth} = $cov_n ? $cov_sum/$cov_n : 0;
     return \%stats;
 }
 sub calc_insert_size_stats
@@ -577,7 +604,9 @@ sub write_header
     my $within = defined $$self{min_inserts_within} ? $$self{min_inserts_within}[1] : 100;
 
     print $fh "<th class='rotate'><div><span>File</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Samples</span></div>\n";
     print $fh "<th class='rotate'><div><span>Sex</span></div>\n";
+    print $fh "<th class='rotate'><div><span>Avg Depth</span></div>\n";
     print $fh "<th class='rotate'><div><span>Number of reads</span></div>\n";
     print $fh "<th class='rotate'><div><span>Error rate [%]</span></div>\n";
     print $fh "<th class='rotate'><div><span>Duplicate reads [%]</span></div>\n";
@@ -589,18 +618,21 @@ sub write_header
     print $fh "<th class='rotate'><div><span>Indels per cycle</span></div>\n";
     print $fh "</thead><tbody>";
 
+    my $i = 0;
     print $txt "# ";
-    print $txt "[1]File\n";
-    print $txt "[2]Sex\t";
-    print $txt "[3]Number of reads\t";
-    print $txt "[4]Error rate [%]\t";
-    print $txt "[5]Duplicate reads [%]\t";
-    print $txt "[5]Paired reads [%]\t";
-    print $txt "[6]Mapped bases [%]\t";
-    print $txt "[7]Overlap bases [%]\t";
-    print $txt "[8]Inserts within $within%\t";
-    print $txt "[9]Ins/Del ratio\t";
-    print $txt "[10]Indels per cycle\n";
+    print $txt "[".(++$i)."]File\n";
+    print $txt "[".(++$i)."]Samples\t";
+    print $txt "[".(++$i)."]Sex\t";
+    print $txt "[".(++$i)."]Average Depth\t";
+    print $txt "[".(++$i)."]Number of reads\t";
+    print $txt "[".(++$i)."]Error rate [%]\t";
+    print $txt "[".(++$i)."]Duplicate reads [%]\t";
+    print $txt "[".(++$i)."]Paired reads [%]\t";
+    print $txt "[".(++$i)."]Mapped bases [%]\t";
+    print $txt "[".(++$i)."]Overlap bases [%]\t";
+    print $txt "[".(++$i)."]Inserts within $within%\t";
+    print $txt "[".(++$i)."]Ins/Del ratio\t";
+    print $txt "[".(++$i)."]Indels per cycle\n";
 }
 sub write_footer
 {
@@ -611,7 +643,7 @@ sub write_stats
 {
     my ($self,$fh,$txt,$file,$stats) = @_;
     my $name = $$file{prefix};
-    my $url  = "$$file{prefix}.stats/index.html";
+    my $url  = "stats/$$file{prefix}.stats/index.html";
 
     my $mapped_bases = 100.*$$stats{bases_mapped}/$$stats{bases_total};
     my $mapped_bases_class = '';
@@ -677,7 +709,9 @@ sub write_stats
 
     print  $fh qq[<tr>\n];
     print  $fh qq[<td class="name"><a href="$url">$name</a>\n];
+    printf $fh qq[<td>%s\n], $$stats{name};
     printf $fh qq[<td>%s\n], $$stats{sex};
+    printf $fh qq[<td>%.1f\n], $$stats{avg_depth};
     printf $fh qq[<td>%s\n], bignum($$stats{sequences});
     printf $fh qq[<td $error_rate_class>%.2f\n], $error_rate;
     printf $fh qq[<td $dup_reads_class>%.2f\n], $dup_reads;
@@ -690,6 +724,7 @@ sub write_stats
     print  $fh qq[</tr>\n];
 
     print  $txt "$name\t";
+    printf $txt "%s\t", $$stats{name};
     printf $txt "%s\t", $$stats{sex};
     printf $txt "%s\t", $$stats{sequences};
     printf $txt "%.2f\t", $error_rate;

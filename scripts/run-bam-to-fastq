@@ -1,0 +1,223 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{samtools} = 'samtools-1.3';
+    $$self{limits}   = { memory=>5_000 };
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            # List of bams
+            bams => undef,
+
+            # executables
+            samtools => 'samtools',
+
+            # define if picard should be used instead of samtools bam2fq
+            java     => undef,
+            picard   => undef,
+
+            limits => { memory=>5_000 },
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Convert BAMs to FASTQs\n" .
+        "Usage: run-bam-to-fastq\n" .
+        "Options:\n" .
+        "   -b, --bams-list <file>      File with bam files\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bams-list' ) { $$self{bams}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{bams}) ) { $self->throw("Expected the -b option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+
+    my @files = $self->list_files($$self{bams});
+    if ( defined $$self{picard} )
+    {
+        $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+        for my $file (@files)
+        {
+            if ( $self->is_finished("$$self{outdir}/$$file{name}.1.fastq.gz") ) { next; }
+            $self->spawn('sort_bam',"$$self{outdir}/$$file{name}.nsorted.bam",$file);
+        }
+        $self->wait;
+        $self->set_limits(memory=>undef);
+
+        for my $file (@files)
+        {
+            $self->spawn('bam2fastq',"$$self{outdir}/$$file{name}.1.fastq.gz","$$self{outdir}/$$file{name}.2.fastq.gz","$$self{outdir}/$$file{name}.3.fastq.gz",$file);
+        }
+        $self->wait;
+        $self->clean(@files);
+    }
+    else
+    {
+        $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+        for my $file (@files)
+        {
+            if ( $self->is_finished("$$self{outdir}/$$file{name}.fastq.gz") ) { next; }
+            $self->spawn('sort_bam',"$$self{outdir}/$$file{name}.nsorted.bam",$file);
+        }
+        $self->wait;
+        $self->set_limits(memory=>undef);
+
+        for my $file (@files)
+        {
+            $self->spawn('bam2fq',"$$self{outdir}/$$file{name}.fastq.gz",$file);
+        }
+    }
+
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,@files) = @_;
+    for my $file (@files)
+    {
+        unlink("$$self{outdir}/$$file{name}.nsorted.bam");
+        unlink("$$self{outdir}/$$file{name}.1.fastq.gz.e");
+        unlink("$$self{outdir}/$$file{name}.1.fastq.gz.e.prev");
+    }
+    $self->SUPER::clean($$self{outdir});
+}
+
+sub list_files
+{
+    my ($self,$list) = @_;
+    my @files = ();
+    my $names = {};
+    open(my $fh,'<',$list) or $self->throw("$list: $!");
+    while (my $line=<$fh>)
+    {
+        my @items = split(/\s+/,$line);
+        chomp($items[-1]);
+        my $file = $items[0];
+        if ( !($file=~m{/(.+)\.bam$}i ) ) { $self->throw("Could not parse file name: $file"); }
+        my $name = $self->unique_name($names,$1);
+        push @files, { src=>$items[0], name=>$name };
+    }
+    close($fh) or $self->throw("close failed: $list");
+    return @files;
+}
+sub unique_name
+{
+    my ($self,$names,$file) = @_;
+    my $new_name = $file;
+    $new_name =~ s{^.*/}{};     # strip directory
+    my $idx = 1;
+    while ( exists($$names{$new_name}) )
+    {
+        $new_name = $idx .'_'. $file;
+        $idx++;
+    }
+    $$names{$new_name} = 1;
+    return $new_name;
+}
+
+sub sort_bam
+{
+    my ($self,$outfile,$file) = @_;
+    $self->cmd("mkdir -p $outfile.tmp");
+
+    # proper sort or faster collate:
+    #    $self->cmd("$$self{samtools} sort -n $$file{src} -O bam -o $outfile.part -T $outfile.tmp/tmp");
+    $self->cmd("$$self{samtools} collate -O $$file{src} $outfile.tmp/tmp > $outfile.part");
+
+    $self->cmd("rm -rf $outfile.tmp");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bam2fq
+{
+    my ($self,$outfile,$file) = @_;
+
+    my $infile = "$$self{outdir}/$$file{name}.nsorted.bam";
+    $self->cmd("$$self{samtools} view -F0xf00 -u $infile | $$self{samtools} bam2fq | gzip -c > $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bam2fastq
+{
+    my ($self,$outfile1,$outfile2,$outfile3,$file) = @_;
+
+    my $mem = $self->get_limits('memory') ? int($self->get_limits('memory') * 0.8) : 0;
+    if ( $mem<=0 ) { $mem = 500; }
+    $self->java_cmd("$$self{java} -Xms${mem}m -Xmx${mem}m -jar $$self{picard} SamToFastq VALIDATION_STRINGENCY=SILENT INPUT=$$self{outdir}/$$file{name}.nsorted.bam FASTQ=$outfile1.part.gz SECOND_END_FASTQ=$outfile2 UNPAIRED_FASTQ=$outfile3","$outfile1.e");
+
+    rename("$outfile1.part.gz",$outfile1) or $self->throw("rename $outfile1.part.gz $outfile1: $!");
+}
+sub java_cmd
+{
+    my ($self,$cmd,$err_file) = @_;
+
+    print STDERR "$cmd 2>$err_file\n";
+    if ( -e $err_file ) { `cat $err_file >> $err_file.prev`; unlink($err_file); }
+
+    `$cmd 2>$err_file`;
+    if ( ! $? ) { return; } # finished OK
+
+    # something went wrong
+    my $out_of_memory = 0;
+    open(my $fh,'<',$err_file) or $self->throw("$err_file: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/java.lang.OutOfMemoryError/ ) { $out_of_memory = 1; last; }
+        if ( $line=~/Could not create the Java virtual machine/ ) { $out_of_memory = 1; last; }
+    }
+    close($fh);
+    if ( !$out_of_memory ) { $self->throw("The command failed: $cmd\n"); }
+
+    # out of memory: tell the runner to use more memory next time
+    my $mem = $self->get_limits('memory') + $$self{memstep};
+    $self->set_limits(memory=>$mem);
+
+    $self->throw("Memory limit exceeded, increasing the memory limit for the next run to $mem. The command was:\n$cmd\n");
+}
+

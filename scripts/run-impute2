@@ -28,8 +28,8 @@ sub new
     $$self{do_clean}      = 1;
     $$self{limits}        = { memory=>5_500, runtime=>3*24*60 };
     $$self{impute2_bin}   = 'impute2';
-    $$self{bcftools}      = '/software/vertres/bin-external/bcftools-exp-rc';
-    $$self{tabix}         = '/software/vertres/bin-external/tabix-exp-rc';
+    $$self{bcftools}      = 'bcftools';
+    $$self{tabix}         = 'tabix';
     $$self{max_chr_len}   = 249250621;
     $$self{concat_args}   = '-ad both';
     $$self{in_GL_tag}     = 'PL';
@@ -348,7 +348,7 @@ sub has_region
         close($fh);
         return 1;
     }
-    close($fh);
+    close($fh) or $self->throw("close failed: $$self{bcftools} query -r $region -f'%CHROM\\t%POS\\n' $file\n");
     return 0;
 }
 
@@ -368,10 +368,6 @@ sub read_chunks
                 {
                     $self->cmd("cp $$self{known_hapref}/$region.chunks.txt $$self{chunk_file}.$region");
                     next;
-                }
-                if ( $region=~/^([^:]+):/ ) # not a whole chromosome
-                {
-                    $self->throw("todo: $region vs $$self{known_hapref}\n");
                 }
             }
             if ( !$self->has_region($$self{in_vcf},$region) ) { next; }

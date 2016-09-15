@@ -24,50 +24,34 @@ sub new
     my ($class,@args) = @_;
     my $self = $class->SUPER::new(@args);
 
+    $$self{split_size} = 10e9;
+    $$self{samtools}  = 'samtools';
+    $$self{mapdamage} = 'mapDamage';
+
     $$self{config_version} = '1427807557';
     $$self{_sampleconf} = q[
             # For sanity checking that your config file is not obsolete. Update
             # the version key in your config file to get rid of the warnings.
             version  => '] .$$self{config_version}. q[',
 
+            samtools  => '] .$$self{samtools}.  q[',
+            mapdamage => '] .$$self{mapdamage}. q[',
+            fa_ref    => undef,
+
+            # 9GB file takes 11hrs to complete, split to regions if bigger
+            split_size => ] .$$self{split_size}. q[,
+
+            regions => [ qw(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X ancY) ],
+
             # Select files in the input directory on which the commands below 
             # will be executed. The files will be processed in parallel.
-            glob => [qw(*.vcf.gz *.bcf)],
-
-            # Config variables can be referenced using curly brackets ({variable}).
-            # The following variables are pre-defined:
-            #   {outdir} .. alias for the argument to --outdir
-            #   {in}     .. input file name (includes the directory part)
-            #   {name}   .. output file name (relative), generated from basename of {in}.
-            #               In case of name clashes, the suffix "_<int>" is added
-            #               automatically to ensure uniqueness.
-            #   {out}    .. output file, alias for {outdir}/out/{name}
-            #   {tmpdir} .. working directory, alias for {outdir}/tmp/{name}. Created automatically
-            #               and deleted when finished.
-
-            # Commands to be executed for each input file. For example:
-            # cmds => 
-            # [
-            #     '{bcftools} annotate ... {in} -Ob -o {tmpdir}/1.bcf',
-            #     '{bcftools} index {tmpdir}/1.bcf',
-            #     '... {tmpdir}/1.bcf {tmpdir}/2.bcf',
-            #     '... {tmpdir}/2.bcf {out}',
-            # ],
-
-            # Create a mapping (possibly multiple ones) between input and output file names
-            # io_map =>
-            # {
-            #     "{outdir}/mapping.txt" => "{in}\t{out}",
-            # },
-
-            # Optional required resources, minutes and MB
-            # limits   => { runtime=>60, memory=>5000 },
+            glob => [qw(*.bam)],
 
     ]."\n";
 
     $$self{usage} .= 
-        "About: Small pipeline to parallelize series of commands\n" .
-        "Usage: run-commands\n" .
+        "About: Run mapDamage\n" .
+        "Usage: run-mapdamage\n" .
         "Options:\n" .
         "   -i, --indir <dir>       Input directory\n" .
         "   -l, --list <file>       List of input file names\n" .
@@ -87,9 +71,9 @@ sub parse_args
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
         $self->throw();
     }
+    if ( !exists($$self{fa_ref}) ) { $self->throw("Expected the fa_ref key."); }
     if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
     if ( !defined($$self{indir}) && !defined($$self{inlist}) ) { $self->throw("Expected the -i or -l option."); }
-    if ( !defined($$self{cmds}) ) { $self->throw("Expected the 'cmds' config key."); }
 }
 
 sub main
@@ -97,28 +81,28 @@ sub main
     my ($self) = @_;
     $self->parse_args();
 
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
     my @files = $self->list_files();
     if ( !@files ) { $self->throw("No files to process?\n"); }
-    `mkdir -p $$self{outdir}/out $$self{outdir}/tmp $$self{outdir}/done`;
+    `mkdir -p $$self{outdir}`;
 
-    for my $file (@files) { $self->cmd("mkdir -p $$file{tmpdir}"); }
+    $self->chunk_files(@files);
 
-    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
-
-    for (my $i=0; $i<@{$$self{cmds}}; $i++)
+    for my $file (@files)
     {
-        for my $file (@files)
+        for my $chunk (@{$$file{chunks}})
         {
-            my $cmd  = $$self{cmds}[$i];
-            my $task = $self->expand_vars($cmd,%$file);
-            $self->spawn('run_command',"$$self{outdir}/done/$$file{name}.$i.done",$task);
+            $self->spawn('mapdamage',$$chunk{outfile},$$chunk{infile},$$chunk{tmpdir});
         }
-        $self->wait;
     }
+    $self->wait;
 
-    for my $file (@files) { $self->cmd("rm -rf $$file{tmpdir}"); }
+    $self->merge_chunks(@files);
 
+    #for my $file (@files) { $self->cmd("rm -rf $$file{tmpdir}"); }
     $self->create_io_map(\@files);
+    $self->cmd("touch $$self{outdir}/all_done");
 
     $self->all_done;
 }
@@ -173,7 +157,7 @@ sub list_files
             my $dir = '.';
             if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
             my $name = $self->unique_name(\%names,$file);
-            push @files, {indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/out/$name",tmpdir=>"$$self{outdir}/tmp/$name"};
+            push @files, {infile=>"$dir/$file",outfile=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"};
         }
         close($fh) or $self->throw("$$self{inlist}: $!");
         return @files;
@@ -184,7 +168,7 @@ sub list_files
         my $dir = '.';
         if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
         my $name = $file;
-        return ({indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/out/$name",tmpdir=>"$$self{outdir}/tmp/$name"});
+        return ({infile=>"$dir/$file",outfile=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"});
     }
     if ( !defined($$self{glob}) ) { $self->throw("Missing the 'glob' config key."); }
     for my $expr (@{$$self{glob}})
@@ -195,7 +179,7 @@ sub list_files
             my $dir = '.';
             if ( $file=~m{^(.+)/} ) { $dir = $1; $file = $'; }
             my $name = $self->unique_name(\%names,$file);
-            push @files,{indir=>$dir,infile=>$file,name=>$name,out=>"$$self{outdir}/out/$name",tmpdir=>"$$self{outdir}/tmp/$name"};
+            push @files,{infile=>"$dir/$file",outfile=>"$$self{outdir}/$name",tmpdir=>"$$self{outdir}/tmp.$name"};
         }
     }
     return @files;
@@ -210,9 +194,7 @@ sub expand_vars
     {
         $out .= $`;
         my $key = $1;
-        if ( $key eq 'in' ) { $key = "$args{indir}/$args{infile}"; }
-        elsif ( $key eq 'out' ) { $key = "$args{out}"; }
-        elsif ( exists($args{$key}) ) { $key = $args{$key}; }
+        if ( exists($args{$key}) ) { $key = $args{$key}; }
         elsif ( exists($$self{$key}) ) { $key = $$self{$key}; }
         else { $self->throw("No such key [$key] [$ori]"); }
         $out .= $key;
@@ -227,6 +209,76 @@ sub run_command
     my ($self,$outfile,$cmd) = @_;
     $self->cmd($cmd,verbose=>1);
     $self->cmd("touch $outfile");
+}
+
+sub chunk_files
+{
+    my ($self,@files) = @_;
+    for my $file (@files)
+    {
+        if ( -s $$file{infile} < $$self{split_size} ) 
+        { 
+            $$file{chunks} = [ { %$file } ];
+            next; 
+        }
+        for my $reg (@{$$self{regions}})
+        {
+            my $chunk = {};
+            $$chunk{infile}  = "$$file{tmpdir}/$reg.in.bam";
+            $$chunk{tmpdir}  = "$$file{tmpdir}/$reg.tmp";
+            $$chunk{outfile} = "$$file{tmpdir}/$reg.out.bam";
+            push @{$$file{chunks}},$chunk;
+
+            $self->spawn('slice_bam',"$$chunk{infile}","$$file{infile}",$reg);
+        }
+    }
+    $self->wait;
+}
+
+sub slice_bam
+{
+    my ($self,$outfile,$infile,$region) = @_;
+    $self->cmd("samtools view -b -o $outfile.part $infile $region",verbose=>1);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub mapdamage
+{
+    my ($self,$outfile,$infile,$tmpdir) = @_;
+
+    `mkdir -p $tmpdir`;
+    $self->cmd("$$self{mapdamage} -i $infile -r $$self{fa_ref} -d $tmpdir/mapdamage --rescale",verbose=>1);
+
+    my @bam = glob("$tmpdir/mapdamage/*.bam");
+    if ( !@bam ) { $self->throw("glob failed: $tmpdir/mapdamage/*.bam"); }
+    chomp($bam[0]);
+    my $bam = $bam[0];
+
+    $self->cmd("samtools index $bam");
+    rename("$bam.bai","$outfile.bai") or $self->throw("rename $bam.bai $outfile.bai: $!");
+    rename($bam,$outfile) or $self->throw("rename $bam $outfile: $!");
+}
+
+sub merge_chunks
+{
+    my ($self,@files) = @_;
+    for my $file (@files)
+    {
+        if ( scalar @{$$file{chunks}} == 1 ) { next; }
+        my @bams = ();
+        for my $chunk (@{$$file{chunks}}) { push @bams,$$chunk{outfile}; }
+        $self->spawn('merge_bams',$$file{outfile},@bams);
+    }
+    $self->wait;
+}
+
+sub merge_bams
+{
+    my ($self,$outfile,@bams) = @_;
+    $self->cmd("$$self{samtools} cat -o $outfile.part ".join(' ',@bams),verbose=>1);
+    $self->cmd("$$self{samtools} index $outfile.part");
+    rename("$outfile.part.bai","$outfile.bai") or $self->throw("rename $outfile.part.bai $outfile.bai: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
 

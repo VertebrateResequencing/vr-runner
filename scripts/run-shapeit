@@ -544,7 +544,7 @@ sub vcf_to_shapeit
     my $outdir = "$$self{outdir}/$chr";
     my $in_vcf = $self->expand_chrom($$self{in_vcf},$chr);
     $self->cmd(qq[mkdir -p $outdir]);
-    $self->cmd(qq[$$self{bcftools} view -r $chr:$from-$to -g ^miss -Ou $in_vcf | $$self{bcftools} convert --gensample $outdir/01.vcf_to_shapeit.$from-$to]);
+    $self->cmd(qq[$$self{bcftools} view -r $chr:$from-$to -i'GT!="."' -Ou $in_vcf | $$self{bcftools} convert --gensample $outdir/01.vcf_to_shapeit.$from-$to]);
     if ( exists($$self{fams}) ) { $self->set_families("$outdir/01.vcf_to_shapeit.$from-$to.samples"); }
     $self->cmd(qq[touch $outfile]);
 }

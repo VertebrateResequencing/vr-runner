@@ -24,8 +24,8 @@ sub new
     my ($class,@args) = @_;
     my $self = $class->SUPER::new(@args);
 
-    $$self{mpileup}        = 'bcftools mpileup -t DP,DV -C50 -pm3 -F0.2 -d10000';
-    $$self{call}           = 'bcftools call -vm -f GQ';
+    $$self{mpileup}        = 'bcftools mpileup -a AD -C50 -pm3 -F0.2 -d10000';
+    $$self{call}           = 'bcftools call -vm';
     $$self{norm}           = 'bcftools norm';
     $$self{reheader}       = 'bcftools reheader';
     $$self{index}          = 'bcftools index';
@@ -96,16 +96,7 @@ sub new
             shuffle_chunks => 0,     # Process chunks in random order to randomize disk access
             debug_chunks   => 0,
 
-            # File or array with ploidy definitions in the format accepted by
-            # bcftools. If not defined, the default ploidy is used, unlisted
-            # regions are diploid:
-            #       X 1 60000 M 1
-            #       X 2699521 154931043 M 1
-            #       Y 1 59373566 M 1
-            #       Y 1 59373566 F 0
-            #       MT 1 16569 M 1
-            #       MT 1 16569 F 1
-            #
+            # File or array with ploidy definitions in the format accepted by bcftools
             ploidy => undef,
             
             limits   => { runtime=>24*60 },
@@ -143,18 +134,6 @@ sub parse_args
 	}
     if ( !exists($$self{alns}) ) { $self->throw("The 'alns' config key is not present\n"); }
     if ( !exists($$self{fa_ref}) ) { $self->throw("The 'fa_ref' config key is not present\n"); }
-    if ( !exists($$self{ploidy}) ) 
-    { 
-        $$self{ploidy} = 
-        [
-            'X 1 60000 M 1',
-            'X 2699521 154931043 M 1',
-            'Y 1 59373566 M 1',
-            'Y 1 59373566 F 0',
-            'MT 1 16569 M 1',
-            'MT 1 16569 F 1'
-        ];
-    }
     if ( $$self{clean} ) 
     { 
         $self->clean($$self{outdir});
@@ -165,6 +144,7 @@ sub parse_args
         $self->mrProper($$self{outdir});
         $self->all_done;
     }
+    if ( defined($$self{ploidy}) ) { $self->throw("todo: Pass \"ploidy\" to bcftools\n"); }
 
     if ( $$self{debug} ) { $self->debug_commands(); $self->all_done; }
 }
@@ -416,10 +396,17 @@ sub write_samples
         my $fname = "$dirname/samples.txt";
         if ( !$self->is_finished($fname) )
         {
+            my %printed = ();
             my $fh = $self->open_file($fname);
             for my $sample (@{$$group{list}})
             {
+                if ( $printed{$$sample{smpl}} )
+                {
+                    if ( $printed{$$sample{smpl}} ne $$sample{sex} ) { $self->throw("Duplicate sample name with conflicting sex: $$sample{smpl}\n"); }
+                    next;
+                }
                 print $fh "$$sample{smpl}\t$$sample{sex}\n";
+                $printed{$$sample{smpl}} = $$sample{sex};
             }
             close($fh) or $self->throw("close failed: $fname");
         }
@@ -591,22 +578,39 @@ sub call_variants
     # to mpileup. This needs to be smarter, disabling for now.
     #
     #   my $smpl_subset = exists($$group{subset_samples}) ? "-s " . join(',',@{$$group{subset_samples}}) : '';
-    #
-    my $smpl_subset = '';
+    #   my $smpl_subset = '';
 
-    my $cmd = 
-        "$$self{mpileup} $smpl_subset -r $chr:$from-$to -b $alns -f $$self{fa_ref} -Ou |" .
-        "$$self{call} $smpl_file";
-    $cmd .= 
-        " -Ou | $$self{norm} -f $$self{fa_ref}" unless !$$self{norm};
-    $cmd .= 
-        " -Ob -o $outfile.part";
-    $self->cmd($cmd);
+    if ( $$self{debug_tmp_files} )
+    {
+        # Pipes are nice but difficult to debug when one of the commands segfaults. Use temporary
+        # files instead. This is slower because of compression/decompression
+        $self->cmd("$$self{mpileup} -r $chr:$from-$to -b $alns -f $$self{fa_ref} -Ob -o $outfile.part1");
+        $self->cmd("$$self{call} $smpl_file $outfile.part1 -Ob -o $outfile.part2");
+        unlink("$outfile.part1");
+        if ( $$self{norm} )
+        {
+            $self->cmd("$$self{norm} -f $$self{fa_ref} $outfile.part2 -Ob -o $outfile.part3");
+            unlink("$outfile.part2");
+            rename("$outfile.part3","$outfile.part") or $self->throw("rename $outfile.part3 $outfile.part: $!");
+        }
+        else
+        {
+            rename("$outfile.part2","$outfile.part") or $self->throw("rename $outfile.part2 $outfile.part: $!");
+        }
+    }
+    else
+    {
+        my $cmd = "$$self{mpileup} -r $chr:$from-$to -b $alns -f $$self{fa_ref}";
+        $cmd .= " -Ou | $$self{call} $smpl_file";
+        $cmd .= " -Ou | $$self{norm} -f $$self{fa_ref}" unless !$$self{norm};
+        $cmd .= " -Ob -o $outfile.part";
+        $self->cmd($cmd);
+    }
 
     if ( exists($$group{rename_samples}) )
     {
-        $cmd = "$$self{reheader} -s $$group{rename_samples} -o $outfile.tmp $outfile.part";
-        $self->cmd($cmd);
+        $self->cmd("$$self{reheader} -s $$group{rename_samples} -o $outfile.tmp $outfile.part");
+        unlink("$outfile.part");
         rename("$outfile.tmp","$outfile.part") or $self->throw("rename $outfile.tmp $outfile.part: $!");
     }
 
