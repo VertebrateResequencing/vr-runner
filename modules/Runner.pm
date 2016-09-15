@@ -483,8 +483,19 @@ sub freeze
 {
     my ($self,$arg) = @_;
     my $rfile = $self->_get_temp_prefix($arg) . '.r';
-    nstore($self,"$rfile.part");
+    my $rfile_prev;
     if ( -e $rfile )
+    {
+        # A race condition can occur when a pending high memory job has its freeze
+        # file in the meantime replaced by a lower memory job. Make sure to update
+        # the maximum memory limits before the freeze file gets replaced.
+        eval { $rfile_prev = retrieve($rfile); };
+        if ( !$@ ) { $self->inc_limits(%{$$rfile_prev{_farm_options}}); }
+        else { $rfile_prev = undef; }
+    }
+
+    nstore($self,"$rfile.part");
+    if ( defined $rfile_prev )
     {
         my $md5_ori = `md5sum $rfile`;
         my $md5_new = `md5sum $rfile.part`;
