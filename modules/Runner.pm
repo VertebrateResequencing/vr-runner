@@ -1152,7 +1152,7 @@ sub _get_temp_dir
     my @items = split(m{/}, $fname);
     my $len = length($fname);
     if ( substr($fname,$len-1,1) ne '/' ) { splice(@items, -1); }
-    if ( $items[-1] eq '.jobs' ) { splice(@items,-1); }
+    if ( @items && $items[-1] eq '.jobs' ) { splice(@items,-1); }
     return join('/',@items,'.jobs');
 }
 
