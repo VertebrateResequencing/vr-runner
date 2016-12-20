@@ -317,7 +317,7 @@ sub init_groups
         {
             if ( $line=~/^#/ or $line=~/^\s*$/ ) { next; }
             my @items = split(/\s+/,$line);
-            if ( scalar @items != $ncols ) { $self->throw("Wrong number of columns, the \"alns\" config key does correspond to $$self{alns}{fname}\n"); }
+            if ( scalar @items != $ncols ) { $self->throw("Wrong number of columns, the \"alns\" config key does points to $$self{alns}{fname}\n"); }
             chomp($items[-1]);
             my $grp  = exists($cols{grp}) ? $items[$cols{grp}] : 'all';
             my $smpl = {};
@@ -647,7 +647,7 @@ sub merge_chunks
     my $cmd = "$$self{concat} -f $outfile.list";
     if ( exists($$self{filter}) && defined($$self{filter}) )
     {
-        $cmd .= " | $$self{filter}"
+        $cmd .= " -Ou | $$self{filter}"
     }
     $cmd .= " -Ob -o $outfile.part";
     $self->cmd($cmd);
