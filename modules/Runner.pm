@@ -449,7 +449,7 @@ sub inc_limits
     {
         if ( !exists($$self{_farm_options}{$key}) or !defined($$self{_farm_options}{$key}) or $$self{_farm_options}{$key}<$args{$key} ) 
         { 
-            $self->debugln("increasing limit, $key set to $args{$key}");
+            $self->debugln("increasing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
             $$self{_farm_options}{$key} = $args{$key};
         }
     }
