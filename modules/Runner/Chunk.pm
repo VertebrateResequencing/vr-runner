@@ -101,25 +101,35 @@ sub list_chrs
 {
     my (%args) = @_;
 
+    # be ready for regions both like 'X' and 'X:154931044-155270560'
+    my %reg2chr = ();
+    if ( exists($args{regions}) )
+    {
+        for my $reg (keys %{$args{regions}})
+        {
+            if ( $reg=~/^([^:]+):/ ) { $reg2chr{$reg} = $1; }
+        }
+    }
+
     if ( exists($args{cache}) && -e $args{cache} )
     {
         my @lines = `cat $args{cache}`;
         if ( $? ) { confess("cat $args{cache} failed .. $!\n"); }
-        my %chrs = ();
+        my %regs = ();
         for my $line (@lines)
         {
             chomp($line);
-            my ($chr,$file) = split(/\t/,$line);
-            if ( exists($args{regions}) && !exists($args{regions}{$chr}) ) { next; }
-            $chrs{$chr}{$file} = 1;
+            my ($reg,$file) = split(/\t/,$line);
+            if ( exists($args{regions}) && !exists($args{regions}{$reg}) ) { next; }
+            $regs{$reg}{$file} = 1;
         }
-        return \%chrs;
+        return \%regs;
     }
 
     if ( !exists($args{bcftools}) ) { $args{bcftools} = 'bcftools'; }
     if ( !exists($args{vcf}) ) { confess("Missing argument: vcf\n"); }
 
-    my %chrs = ();
+    my %regs = ();
     for my $vcf (@{$args{vcf}})
     {
         if ( ! -e $vcf ) { confess("No such file: $vcf\n"); }
@@ -127,24 +137,44 @@ sub list_chrs
         my $cmd = "$args{bcftools} index -s $vcf";    # get the list of chromosomes
         my @lines = `$cmd`;
         if ( $? ) { confess("Error occurred: $cmd .. $!\n"); }
+        my %chrs = ();
         for my $line (@lines)
         {
             my ($chr,$size,$nrec) = split(/\t/,$line);
-            if ( exists($args{regions}) && !exists($args{regions}{$chr}) ) { next; }
             chomp($nrec);
-            if ( $nrec ) {$chrs{$chr}{$vcf} = 1; }
+            if ( !$nrec ) { next; }
+            if ( exists($args{regions}) ) { $chrs{$chr} = 1; }
+            else { $regs{$chr}{$vcf} = 1; }
+        }
+        if ( exists($args{regions}) )
+        {
+            for my $reg (keys %{$args{regions}})
+            {
+                my $chr = exists($reg2chr{$reg}) ? $reg2chr{$reg} : $reg;
+                if ( !exists($chrs{$chr}) ) { next; }
+
+                if ( !exists($reg2chr{$reg}) ) { $regs{$reg}{$vcf} = 1; }   # whole chromosome
+                else 
+                {
+                    my $cmd = "$args{bcftools} query -f'%POS\\n' $vcf -r $reg";
+                    open(my $fh,"$cmd |") or confess("$cmd: $!");
+                    my $pos = <$fh>;
+                    close($fh);
+                    if ( defined $pos ) { $regs{$reg}{$vcf} = 1; }  # the region is not empty
+                }
+            }
         }
     }
     open(my $fh,'>',$args{cache}) or confess("$args{cache}: $!");
-    for my $chr (keys %chrs) 
+    for my $reg (keys %regs) 
     { 
-        for my $file (keys %{$chrs{$chr}})
+        for my $file (keys %{$regs{$reg}})
         {
-            print $fh "$chr\t$file\n"; 
+            print $fh "$reg\t$file\n"; 
         }
     }
     close($fh) or confess("close failed: $!");
-    return \%chrs;
+    return \%regs;
 }
 
 =head2 list
@@ -239,20 +269,20 @@ sub _chunk_vcf
         my $start = 1;
         my $end   = 2147483647;    # INT_MAX
 
-            while ( $start < $end )
-            {
-                my $cmd = "$args{bcftools} query -f'%POS\\n' $args{vcf} -r $chr:$start-";
-                print STDERR "$cmd\n";
-                open(my $fh,"$cmd |") or confess("$cmd: $!");
-                my $pos = <$fh>;
-                if ( !defined $pos ) { last; }
-                chomp($pos);
-                close($fh);
+        while ( $start < $end )
+        {
+            my $cmd = "$args{bcftools} query -f'%POS\\n' $args{vcf} -r $chr:$start-";
+            print STDERR "$cmd\n";
+            open(my $fh,"$cmd |") or confess("$cmd: $!");
+            my $pos = <$fh>;
+            if ( !defined $pos ) { last; }
+            chomp($pos);
+            close($fh);
 
-                $pos += int($args{size_bp});
-                push @$chunks, { chr=>$chr, beg=>$start, end=>$pos };
-                $start = $pos+1;
-            }
+            $pos += int($args{size_bp});
+            push @$chunks, { chr=>$chr, beg=>$start, end=>$pos };
+            $start = $pos+1;
+        }
         if ( scalar @$chunks ) { $$chunks[-1]{end} = $end; }
     }
     _write_cache($chunks,cache=>$outfile);
@@ -509,7 +539,7 @@ sub merge_samples
         push @chunks, { vcf=>$$task{vcf}[0], cache=>"$prefix.chunks", prefix=>$prefix };
     }
     my $chunked_tasks = $runner->Runner::Chunk::list(%args, files=>\@chunks);
-    
+
     for (my $i=0; $i<@tasks; $i++)
     {
         my $task   = $tasks[$i];
