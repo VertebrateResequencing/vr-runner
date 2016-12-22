@@ -33,7 +33,7 @@ sub new
     $$self{bcftools} = 'bcftools';
     $$self{pbwt_ref} = 'imputation-ref-panels/pbwt/chr{CHROM}.1000g';
     $$self{fa_ref}   = 'ref/hs37d5.fa';
-    $$self{regions}  = [1..22];
+    $$self{regions}  = [1..22,'X:1-2699520','X:2699521-154931043','X:154931044-155270560'];
     $$self{fmt}      = 'bcf';
 
     $$self{config_version} = '1427807557';
@@ -51,8 +51,14 @@ sub new
         # add custom annotations
         annotate => undef,
 
-        regions  => [1..22],
         fmt      => '] .$$self{fmt}. q[',       # output fmt: bcf or vcf
+        regions  => [1..22,'X:1-2699520','X:2699521-154931043','X:154931044-155270560'],
+        region_options =>
+        {
+            'X:1-2699520'           => { CHROM => 'X_PAR1' },
+            'X:2699521-154931043'   => { CHROM => 'X_nonPAR', is_chrX => 'b37' },
+            'X:154931044-155270560' => { CHROM => 'X_PAR2' },
+        },
 
         # merging the imputation results will run in parallel over chunks of this size (Mbp)
         max_size_Mb => ] .$$self{max_size_Mb}. q[,
@@ -120,7 +126,6 @@ sub main
                 cache   => "$outdir/chunks.chr.txt",
                 regions => $$self{regions},
             );
-
 
     # run pbwt
     my %merge = ();
@@ -237,13 +242,32 @@ sub run_pbwt
 {
     my ($self,$outfile,%args) = @_;
 
-    my $pbwt_ref = $self->expand_chrom($$self{pbwt_ref},$args{region});
+    my $name = $args{region};
+    my $opts = '';
+    if ( exists($$self{region_options}) )
+    {
+        if ( exists($$self{region_options}{$args{region}}{CHROM}) ) { $name = $$self{region_options}{$args{region}}{CHROM}; }
+        if ( defined($$self{region_options}{$args{region}}{is_chrX}) )
+        {
+            my $samples;
+            if ( -e "$args{vcf}.samples" ) { $samples = "$args{vcf}.samples"; }
+            else
+            {
+                $samples  = "$outfile.samples";
+                my $build = $$self{region_options}{$args{region}}{is_chrX};
+                $self->cmd(qq[$$self{bcftools} +guess-ploidy -g $build $args{vcf} | awk '{printf "%s\\tsex:Z:%s\\n",\$1,\$2;}' > $samples]);
+            }
+            $opts = "-X -loadSamples $samples"; 
+        }
+    }
+
+    my $pbwt_ref = $self->expand_chrom($$self{pbwt_ref},$name);
     if ( ! -e "$pbwt_ref.pbwt" && $pbwt_ref=~/\.pbwt$/ ) { $pbwt_ref =~ s/\.pbwt$//; }
-    if ( ! -e "$pbwt_ref.pbwt" ) { $self->throw("No such file: $pbwt_ref.pbwt .. [$$self{pbwt_ref},$args{region}]\n"); }
+    if ( ! -e "$pbwt_ref.pbwt" ) { $self->throw("No such file: $pbwt_ref.pbwt .. [$$self{pbwt_ref},$args{region},$name]\n"); }
 
     my $cmd = 
         "$$self{bcftools} view -Ou -r $args{region} -S $args{samples} $args{vcf} " .
-        " | $$self{pbwt} -log $outfile.log -readVcfGT - -referenceFasta $$self{fa_ref} -referenceImpute $pbwt_ref -writeBcfGz $outfile.part";
+        " | $$self{pbwt} -log $outfile.log $opts -readVcfGT - -referenceFasta $$self{fa_ref} -referenceImpute $pbwt_ref -writeBcfGz $outfile.part";
 
     $self->cmd($cmd);
 
