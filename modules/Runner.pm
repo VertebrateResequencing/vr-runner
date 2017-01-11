@@ -399,7 +399,7 @@ sub _sample_config
                 Expected running time [minutes] or undef to unset
             <queues>
                 Hash with farm queue names (keys) and maximum runtime limits in
-                seconds (values)
+                minutes (values), for example: queues=>{normal=>12*60,small=>30}
             <wakeup_interval>
                 Make the job scheduler aware of the pipeline's polling interval
                 [seconds] so that it can estimate if a job exceeds the runtime
