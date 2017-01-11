@@ -68,11 +68,12 @@ sub new
         #   cmd => 'wc -l',
         #   cmd => 'vcf-merge -r {REGION} {INPUT}',
         #   cmd => 'bcftools check -r {REGION} A.vcf.gz B.vcf.gz'
+        #   cmd => q[bcftools view -r {REGION} {INPUT} -i'POS>={BEG}' -Ou | bcftools call -mv -Ob -o {OUTPUT}],
 
 
         # 3) Set optional keys to determine how the outputs should be merged.
         # If not set, the chunks will be concatenated as they are. Otherwise,
-        # vcf-concat will be used. Todo: allow user-defined command to merge
+        # `bcftools concat` will be used. Todo: allow user-defined command to merge
         # the outputs.
         vcf_concat => 1,
 
