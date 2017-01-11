@@ -249,11 +249,16 @@ sub run_pbwt
         if ( exists($$self{region_options}{$args{region}}{CHROM}) ) { $name = $$self{region_options}{$args{region}}{CHROM}; }
         if ( defined($$self{region_options}{$args{region}}{is_chrX}) )
         {
-            my $samples;
-            if ( -e "$args{vcf}.samples" ) { $samples = "$args{vcf}.samples"; }
+            # MaleSample M     ->   SampleName sex:Z:M
+            # FemaleSample F        SampleName sex:Z:F
+
+            my $samples = "$outfile.samples";
+            if ( -e "$args{vcf}.samples" )
+            { 
+                $self->cmd(qq[cat $args{vcf}.samples | awk '{printf "%s\\tsex:Z:%s\\n",\$1,\$2;}' > $samples]);
+            }
             else
             {
-                $samples  = "$outfile.samples";
                 my $build = $$self{region_options}{$args{region}}{is_chrX};
                 $self->cmd(qq[$$self{bcftools} +guess-ploidy -g $build $args{vcf} | awk '{printf "%s\\tsex:Z:%s\\n",\$1,\$2;}' > $samples]);
             }
