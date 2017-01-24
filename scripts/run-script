@@ -1,0 +1,104 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+
+            # Run with --run <program>, --shell <code>, or give a perl code here:
+            # perl => q[
+            #   print "Hello world!\n";
+            # ],
+
+            # Optional required resources, minutes and MB
+            # limits   => { runtime=>60, memory=>5000 },
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Small pipeline to run a command via the runner framework\n" .
+        "Usage: run-script\n" .
+        "Options:\n" .
+        "   -o, --outdir <dir>      Output directory, required for runner's temporary data\n" .
+        "   -r, --run <file>        Script or program to execute\n" .
+        "   -s, --shell <code>      Shell code to execute\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--run' ) { $$self{run}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--shell' ) { $$self{shell}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    my $n = 0;
+    if ( defined($$self{shell}) ) { $n++; }
+    if ( defined($$self{run}) ) { $n++; }
+    if ( defined($$self{perl}) ) { $n++; }
+    if ( $n!=1 ) { $self->throw("Expected one (and only one) code: either the 'perl' config key or one of the -c or -r options.\n"); }
+    if ( defined($$self{run}) && !($$self{run}=~m{^/}) &&  !($$self{run}=~m{^\./}) ) { $self->throw("Full path must be given: -r $$self{run}\n"); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+    $self->spawn('run_command',"$$self{outdir}/all_done");
+    $self->wait;
+
+    $self->all_done;
+}
+
+sub run_command
+{
+    my ($self,$outfile) = @_;
+    if ( defined($$self{run}) ) 
+    { 
+        my @out = $self->cmd($$self{run},verbose=>1); 
+    }
+    elsif ( defined($$self{shell}) )
+    {
+        open(my $fh,"| /bin/sh") or $self->throw("Shell code failed: $!\n");
+        print $fh $$self{shell};
+        close($fh) or $self->throw("close failed: | /bin/sh");
+    }
+    else
+    {
+        eval "$$self{perl}";
+        if ( $@ ) { $self->throw("The code failed:\n$@"); }
+    }
+    $self->cmd("touch $outfile");
+}
+
+
