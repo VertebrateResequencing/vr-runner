@@ -1,0 +1,206 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{samtools} = 'samtools';
+    $$self{sex} = '{Y} < {22}*0.1 ? "F" : "M"';
+    $$self{_sampleconf} = '';
+
+    $$self{usage} .= 
+        "About: Small pipeline to determine sample sex from bam/cram files\n" .
+        "Usage: run-guess-sex\n" .
+        "Options:\n" .
+        "   -i, --input-files <list>    List of input files\n" .
+        "   -o, --outdir <dir>          Output directory\n" .
+        "   -s, --sex <expr>            The default is: '{Y} < {22}*0.1 ? \"F\" : \"M\"'\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-i' or $arg eq '--input-files' ) { $$self{input_files}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--sex' ) { $$self{sex}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !exists($$self{input_files}) ) { $self->throw("Expected the -i option."); }
+    $$self{outdir} =~ s{/*$}{};
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    $self->init_regions();
+    $self->spawn('init_samples',"$$self{outdir}/sample.list",$$self{input_files});
+    $self->wait;
+
+    my @files = ();
+    my @samples = $self->parse_samples();
+    for my $sample (@samples)
+    {
+        $self->spawn('bam_stats',"$$self{outdir}/$$sample{id}.txt",$sample);
+        push @files, "$$self{outdir}/$$sample{id}.txt";
+    }
+    $self->wait;
+    
+    $self->concat_files("$$self{outdir}.txt", \@files);
+    $self->all_done;
+}
+
+sub concat_files
+{
+    my ($self,$outfile,$files) = @_;
+    if ( -e $outfile ) { return; }
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    print $fh "# [1]Sample\t[2]Sex\t[3]nReads mapped to $$self{reg1}\t[4]nReads mapped to $$self{reg2}\t[5]Input file\n";
+    for my $file (@$files)
+    {
+        my @lines = `cat $file`;
+        print $fh @lines;
+    }
+    close($fh) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub parse_samples
+{
+    my ($self) = @_;
+
+    my @out = ();
+    open(my $fh,'<',"$$self{outdir}/sample.list") or $self->throw("$$self{outdir}/sample.list: $!");
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        my @items = split(/\t/,$line);
+        push @out,{fmt=>$items[0],id=>$items[1],sample=>$items[2],file=>$items[3]};
+    }
+    close($fh) or $self->throw("$$self{outdir}/sample.list: close failed");
+    return @out;
+}
+
+sub init_regions
+{
+    my ($self) = @_;
+
+    my $expr = $$self{sex};
+    if ( !($expr=~/\{([a-zA-Z0-9_.:]+)\}/) ) { $self->throw("Could not determine first region in $$self{sex}\n"); }
+    $$self{reg1} = $1;
+    $expr = $';
+    if ( !($expr=~/\{([a-zA-Z0-9_.:]+)\}/) ) { $self->throw("Could not determine first region in $$self{sex}\n"); }
+    $$self{reg2} = $1;
+}
+
+sub init_samples
+{
+    my ($self,$outfile,$input_files) = @_;
+
+    open(my $fh,'<',$input_files) or $self->throw("$input_files: $!");
+    my %names = ();
+    my $id = 0;
+    my @out = ();
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        $line =~ s/^\s*//;
+        $line =~ s/\s*$//;
+        if ( $line=~/^\s*$/ ) { next; }
+        if ( $line=~/^#/ ) { next; }
+
+        my %smpl = ();
+        open(my $aln,"$$self{samtools} view -H $line |") or $self->throw("$$self{samtools} view -H $line: $!");
+        while (my $aline=<$aln>)
+        {
+            if ( !($aline=~/^\@RG/) ) { next; }
+            if ( $aline=~/SM:(\S+)/ && !exists($smpl{$1}) )
+            {
+                $smpl{$1} = {fmt=>'aln',file=>$line,sample=>$1,id=>++$id}; 
+            }
+        }
+        close($aln) or $self->throw("$$self{samtools} view -H $line: close failed");
+        if ( scalar keys %smpl != 1 ) { $self->throw("Multiple samples in one file, need back `samtools stats` header parsing\n"); }
+        push @out,values %smpl; 
+    }
+    close($fh) or $self->throw("$$self{input_files}: close failed");
+
+    open($fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    for my $line (@out)
+    {
+        print $fh "$$line{fmt}\t$$line{id}\t$$line{sample}\t$$line{file}\n";
+    }
+    close($fh) or $self->throw("$outfile.part: close failed");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bam_stats
+{
+    my ($self,$outfile,$file) = @_;
+    
+    my $chr = $$self{chr_naming} ? 'chr' : '';
+    $self->cmd("$$self{samtools} stats $$file{file} $$self{reg1} > $outfile.$$self{reg1}.bchk");
+    $self->cmd("$$self{samtools} stats $$file{file} $$self{reg2} > $outfile.$$self{reg2}.bchk");
+
+    my $num1 = $self->read_bamstats("$outfile.$$self{reg1}.bchk","SN\tsequences:");
+    my $num2 = $self->read_bamstats("$outfile.$$self{reg2}.bchk","SN\tsequences:");
+
+    my $expr = $$self{sex};
+    $expr =~ s/\{$$self{reg1}\}/$num1/;
+    $expr =~ s/\{$$self{reg2}\}/$num2/;
+    my $sex = eval $expr;
+    if ( $@ ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
+
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    printf $fh "$$file{sample}\t%s\t%d\t%d\t$$file{file}\n",$sex,$num1,$num2;
+    close($fh) or $self->throw("$outfile.part: close failed");
+
+    rename("$outfile.part",$outfile);
+}
+
+sub read_bamstats
+{
+    my ($self,$bchk,$field) = @_;
+    my $n;
+    open(my $fh,'<',$bchk) or $self->throw("$bchk: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/^$field/ ) { $n = $'; }
+    }
+    close($fh);
+    chomp($n);
+    $n =~ s/^\s*//;
+    $n =~ s/\s*$//;
+    return $n;
+}
+
+
+
+
