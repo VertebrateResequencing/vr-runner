@@ -27,7 +27,8 @@ sub new
         ZOMBI => $$self{Zombi},
         RUN   => $$self{Running}, 
         UNKWN => $$self{Running}, 
-        SSUSP => $$self{Running}
+        SSUSP => $$self{Running},
+        USUSP => $$self{Running}
     };
 
     # runtime and queue_limits are in minutes
