@@ -477,7 +477,6 @@ sub beagle
         my $action = "$$self{input_tag}=$prefix.in.vcf.gz";
         $self->create_vcf_chunk($in_vcf,"$prefix.in.vcf.gz",$chr,$from,$to);
         $self->java_cmd(qq[$$self{java_exec} -Xms${mem}m -Xmx${mem}m $$self{java_args} -jar $$self{beagle_jar} $$self{beagle_args} $known $action out=$prefix.part],"$outfile.e");
-        if ( -s "$outfile.e" ) { $self->throw("Expected empty error file: $outfile.e"); }
         rename("$prefix.part.vcf.gz","$prefix.vcf.gz") or $self->throw("rename $prefix.part.vcf.gz $prefix.vcf.gz: $!");
         unlink("$prefix.in.vcf.gz");
         unlink("$prefix.ref.vcf.gz");
