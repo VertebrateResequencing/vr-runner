@@ -924,6 +924,11 @@ sub wait
                     my $mem = $limits{memory}*1.3 > $limits{memory}+1_000 ? $limits{memory}*1.3 : $limits{memory}+1_000;
                     $self->inc_limits(memory=>$mem); 
                 }
+                if ( exists($limits{RUNLIMIT}) )
+                { 
+                    my $time = $limits{runtime}*1.5;
+                    $self->inc_limits(runtime=>$time); 
+                }
             }
 
             if ( $must_run )

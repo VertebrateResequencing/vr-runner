@@ -433,6 +433,7 @@ sub _parse_output
     # cr_restart exits
     my @attempts = ();
     my $mem_killed = 0;
+    my $cpu_killed = 0;
 
     open(my $fh,'<',$fname) or confess("$fname: $!");
     while (my $line=<$fh>)
@@ -459,6 +460,13 @@ sub _parse_output
         if ( $line =~ /^TERM_CHKPNT/ && $$out{nfailures} ) { $$out{nfailures}--; }
         if ( $line =~ /^TERM_OWNER/ && $$out{nfailures} ) { $$out{nfailures}--; }
         if ( $line =~ /^TERM_MEMLIMIT:/) { $mem_killed = 1; next; }
+        if ( $line =~ /^TERM_RUNLIMIT:/) { $cpu_killed = 1; next; }
+        if ( $line =~ /^\s+CPU time\s+:\s+(\S+)\s+(\S+)/) 
+        {
+            if ( $2 ne 'sec.' ) { confess("Unexpected runtime line: $line"); }
+            my $time = $1 / 60;     # minutes
+            if ( !exists($$out{runtime}) or $$out{runtime}<$time ) { $$out{runtime} = $time; }
+        }
         if ( $line =~ /^\s+Max Memory\s+:\s+(\S+)\s+(\S+)/) 
         {
             my $mem = $1;
@@ -477,6 +485,7 @@ sub _parse_output
         }
     }
     if ( $mem_killed ) { $$out{MEMLIMIT} = $$out{memory}; }
+    if ( $cpu_killed ) { $$out{RUNLIMIT} = $$out{runtime}; }
     return $out;
 }
 
@@ -491,6 +500,14 @@ sub past_limits
     if ( exists($$task{memory}) )
     {
         $out{memory} = $$task{memory};
+    }
+    if ( exists($$task{TIMELIMIT}) )
+    {
+        $out{RUNLIMIT} = $$task{RUNLIMIT};
+    }
+    if ( exists($$task{runtime}) )
+    {
+        $out{runtime} = $$task{runtime};
     }
     return %out;
 }
