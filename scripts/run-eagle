@@ -35,8 +35,9 @@ sub new
     $$self{gen_map}  = 'resources/refs/imputation/genetic-map/genetic_map_chr{CHROM}_combined_b37.txt';
     $$self{regions}  = [1..22];
     $$self{fmt}      = 'bcf';
-    $$self{merge_samples} = 1;
-    $$self{concat_chrs}   = 1;
+    $$self{merge_samples}  = 1;
+    $$self{concat_chrs}    = 1;
+    $$self{impute_missing} = 0;
 
     $$self{config_version} = '1427807557';
     $$self{_sampleconf} = q[
@@ -50,13 +51,16 @@ sub new
         vcf_ref  => '] .$$self{vcf_ref}.  q[',
         gen_map  => '] .$$self{gen_map}.  q[',
 
+        # If set to 0, eagle will not impute missing ./. genotypes
+        impute_missing => 0,
+
         regions  => [1..22],
         fmt      => '] .$$self{fmt}. q[',       # output fmt: bcf or vcf
 
-        # merging the imputation results will run in parallel over chunks of this size (Mbp)
+        # merging the phased results will run in parallel over chunks of this size (Mbp)
         max_size_Mb => ] .$$self{max_size_Mb}. q[,
 
-        # max samples for pbwt imputation. Input VCF will be split into subsets
+        # max samples for eagle phasing. Input VCF will be split into subsets
         # containing at most this many samples
         max_samples => ] .$$self{max_samples}. q[,
 
@@ -74,7 +78,7 @@ sub new
         "About: Run eagle phasing on a list of VCF/BCF files\n" .
         "Usage: run-eagle\n" .
         "Options:\n" .
-        "   -f, --file <file>           VCF/BCF file to impute\n" .
+        "   -f, --file <file>           VCF/BCF file to phase\n" .
         "   -l, --list <file>           File with VCF/BCF file names\n" .
         "   -o, --outdir <dir>          Output directory\n" .
         "\n";
@@ -302,7 +306,8 @@ sub run_eagle
         }
     }
 
-    my $cmd = "$$self{eagle} --chrom $args{region} --vcfRef $vcf_ref --vcfTarget $args{vcf} --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part > $outfile.log";
+    my $imp = $$self{impute_missing} ? '' : '--noImpMissing';
+    my $cmd = "$$self{eagle} $imp --chrom $args{region} --vcfRef $vcf_ref --vcfTarget $args{vcf} --geneticMapFile $gen_map --vcfOutFormat b --outPrefix $outfile.part > $outfile.log";
     $self->cmd($cmd);
 
     $self->cmd("bcftools index -f $outfile.part.bcf");
