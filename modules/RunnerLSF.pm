@@ -426,8 +426,18 @@ sub _parse_output
     my $fname = "$output.$jid.o";
     if ( !-e $fname ) { return undef; }
     
-    # if the output file is empty, assume the job is running
-    my $out = { status=>$$self{Running} };
+    # This original version leads to problem with stalled jobs that have no record in bjobs
+    # and their LSF output file is empty - they would never be rescheduled.
+    #
+    #   # if the output file is empty, assume the job is running
+    #   my $out = { status=>$$self{Running} };
+    #
+    # Instead, let's try what happens if assume they are not running. This assumes:
+    #   - a job that was just submitted will be immediately present via bjobs
+    #   - a job that finished is visible via bjobs until the output is visible on the file system
+    #   - this routine is called only when there is no bjobs record
+    #
+    my $out = { status=>$$self{No} };
 
     # collect command lines and exit status to detect non-critical
     # cr_restart exits
