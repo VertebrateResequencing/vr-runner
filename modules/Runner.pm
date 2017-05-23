@@ -1165,6 +1165,7 @@ sub _mkdir
 {
     my ($self,$fname) = @_;
     $fname =~ s{[^/]+$}{};
+    if ( $fname eq '' ) { $fname = './'; }
     if ( !-e $fname ) { `mkdir -p $fname`; }
     return $fname;
 }
