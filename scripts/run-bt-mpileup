@@ -474,7 +474,12 @@ sub init_chunks
     my ($self) = @_;
 
     my $regions = [];
-    if ( ref($$self{regions}) eq 'ARRAY' )
+    if ( !exists($$self{regions}) or !defined($$self{regions}) )
+    {
+        my $chrs = $self->read_fai("$$self{fa_ref}.fai");
+        for my $chr (sort keys %$chrs) { push @$regions, { chr=>$chr, from=>1, to=>$$chrs{$chr} }; }
+    }
+    elsif ( ref($$self{regions}) eq 'ARRAY' )
     {
         my $lengths;
         for my $reg (@{$$self{regions}})

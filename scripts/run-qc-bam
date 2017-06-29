@@ -25,7 +25,7 @@ sub new
     my $self = $class->SUPER::new(@args);
 
     $$self{verbose} = 1;
-    $$self{sex} = '{Y} < {22}*0.1 ? "F" : "M"',
+    $$self{sex} = '{Y} < {22}*0.1 ? "F" : "M"';
     $$self{samtools} = 'samtools';
     $$self{plot_stats} = 'plot-bamstats';
     $$self{config_version} = '1427807557';
@@ -337,6 +337,24 @@ sex_done:
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }   
 
+sub bam_idxstats
+{
+    my ($self,$bam) = @_;
+    my $len = 0;
+    my $cmd = "samtools idxstats $bam";
+    print STDERR "$cmd\n";
+    open(my $fh,"$cmd |") or $self->throw("$cmd: $!");
+    while (my $line=<$fh>)
+    {
+        my @vals = split(/\t/,$line);
+        if ( $vals[0] eq '*' ) { next; }
+        if ( $vals[2] eq '0' ) { next; }
+        $len += $vals[1];
+    }
+    close($fh) or $self->throw("close failed: $cmd");
+    return $len;
+}
+
 sub create_stats
 {
     my ($self,$outfile,$files) = @_;
@@ -345,7 +363,8 @@ sub create_stats
     $self->write_header($fh,$txt);
     for my $file (@$files)
     {
-        my $stats = $self->parse_bam_stats("$$self{outdir}/stats/$$file{prefix}.bchk");
+        my $len   = $self->bam_idxstats($$file{bam});
+        my $stats = $self->parse_bam_stats("$$self{outdir}/stats/$$file{prefix}.bchk", $len);
         my $sex   = $self->parse_sex_stats("$$self{outdir}/stats/$$file{prefix}.sex");
         $self->write_stats($fh,$txt,$file,{%$stats,%$sex});
     }
@@ -383,7 +402,7 @@ sub parse_sex_stats
 
 sub parse_bam_stats
 {
-    my ($self,$file) = @_;
+    my ($self,$file,$len) = @_;
     my %stats = ();
     my @insert_size_lines = ();
     my @indel_dist_lines = ();
@@ -434,7 +453,8 @@ sub parse_bam_stats
     $self->calc_insert_size_stats(\%stats,\@insert_size_lines);
     $self->calc_indel_ratio_stats(\%stats,\@indel_dist_lines);
     $self->calc_indel_per_cycle_stats(\%stats,\@indel_per_cycle_lines);
-    $stats{avg_depth} = $cov_n ? $cov_sum/$cov_n : 0;
+    $stats{avg_depth}  = $cov_n ? $cov_sum/$cov_n : 0;
+    $stats{avg_depth0} = $len ? $cov_sum/$len : 0;
     return \%stats;
 }
 sub calc_insert_size_stats
@@ -620,10 +640,11 @@ sub write_header
 
     my $i = 0;
     print $txt "# ";
-    print $txt "[".(++$i)."]File\n";
+    print $txt "[".(++$i)."]File\t";
     print $txt "[".(++$i)."]Samples\t";
     print $txt "[".(++$i)."]Sex\t";
-    print $txt "[".(++$i)."]Average Depth\t";
+    print $txt "[".(++$i)."]Average Depth, in regions with coverage\t";
+    print $txt "[".(++$i)."]Average Depth, whole-genome\t";
     print $txt "[".(++$i)."]Number of reads\t";
     print $txt "[".(++$i)."]Error rate [%]\t";
     print $txt "[".(++$i)."]Duplicate reads [%]\t";
@@ -711,7 +732,7 @@ sub write_stats
     print  $fh qq[<td class="name"><a href="$url">$name</a>\n];
     printf $fh qq[<td>%s\n], $$stats{name};
     printf $fh qq[<td>%s\n], $$stats{sex};
-    printf $fh qq[<td>%.1f\n], $$stats{avg_depth};
+    printf $fh qq[<td>%.1f / %.1f\n], $$stats{avg_depth},$$stats{avg_depth0};
     printf $fh qq[<td>%s\n], bignum($$stats{sequences});
     printf $fh qq[<td $error_rate_class>%.2f\n], $error_rate;
     printf $fh qq[<td $dup_reads_class>%.2f\n], $dup_reads;
@@ -726,6 +747,8 @@ sub write_stats
     print  $txt "$name\t";
     printf $txt "%s\t", $$stats{name};
     printf $txt "%s\t", $$stats{sex};
+    printf $txt "%.1f\t", $$stats{avg_depth};
+    printf $txt "%.1f\t", $$stats{avg_depth0};
     printf $txt "%s\t", $$stats{sequences};
     printf $txt "%.2f\t", $error_rate;
     printf $txt "%.2f\t", $dup_reads;

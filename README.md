@@ -176,21 +176,21 @@ runner framework.
 </dd>
 
 <dt>Performance: the runner daemon takes too long to submit a job!</dt>
-<dd>If a pipeline spawns ten thousands and more simultaneous jobs, the runner daemon can spend
-a long time just by checking the status of pending tasks.
-The number of simultaneous jobs can (and should) be limited by providing the <b>+maxjobs</b>
-option. For example, if the computing farm typically lets you run 500 jobs in parallel, running
-with <b>+maxjobs 800</b> tells the pipeline to submitted the jobs in smaller batches.
-If all jobs are running and none is pending, then increase the limit.
+<dd>By default, the pipeline runs at most 100 jobs in parallel. This limit
+can be increased by providing the <b>+maxjobs</b> option. 
+For example, if the computing farm typically lets you run 500 jobs in parallel, running
+with <b>+maxjobs 500</b> tells the pipeline to submit the jobs in batches up to 500.
+Note that if the limit is set too high (tens of thousands of jobs) and most tasks
+are pending, the runner daemon can spend a long time by checking the status of the
+pending tasks; therefore it is better to set the number to a realistic value.
 </dd>
-</dl>
 
 <dt>How to skip a job</dt>
 <dd>If a task keeps failing, the pipeline can be told to skip the offending task by setting negative value of the <b>+retries</b> option. With negative value of +retries, a skip file with the ".s" suffix is created and the job is reported as finished. The skip files are cleaned automatically when +retries is set to a positive value. A non cleanable variant is a force skip ".fs" file which is never cleaned by the pipeline and is created/removed manually by the user. When .fs is cleaned by the user, the pipeline must be run with +nocache in order to notice the change.
 </dd>
 
 <dt>Kill all running jobs</dt>
-<dd>When something goes wrong and all jobs must be killed, the <b>+kill</b> option does the trick.
+<dd>When something goes wrong and all running jobs must be killed, use the <b>+kill</b> option.
 </dd>
 </dl>
 

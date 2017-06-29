@@ -28,6 +28,8 @@ sub new
     $$self{reads_per_chunk} = 100_000;
     $$self{samtools} = 'samtools';
     $$self{bwa}      = 'bwa';
+    $$self{bwa_mem}  = 1;
+    $$self{merge}    = 0;
     $$self{aln_args} = '';
     $$self{limits}   = { memory=>3_500 };
     $$self{config_version} = '1427807557';
@@ -39,14 +41,22 @@ sub new
             # List of fastq files, one file per line followed by output
             # file name and RG line, white-space separated:
             #   file.fastq  out.bam  @RG\tID:lane1\tSM:60A_Sc_DBVPG6044
+            # If the second field is "-", autogenerate the name.
             fastq_se  => undef,
 
             # Same as fastq_se, but comma-separated pairs of input files:
             #   file1.fastq,file2.fastq  out.bam  @RG\tID:lane1\tSM:60A_Sc_DBVPG6044
+            # If the second field is "-", autogenerate the name.
             fastq_pe  => undef,
 
             # List of unmapped bams with read pairs sorted by name
             bam_pe    => undef,
+
+            # Sort if the bams are not sorted
+            # bam_sort  => 'samtools view -F 0x100 -bu {IN} | samtools collate -n 128 - {OUT}',
+
+            # If defined, use `bwa mem -C` to transfer an existing bam tag
+            # bam_tag => 'BX',
 
             # reference sequence in fasta format
             fa_ref => undef,
@@ -55,10 +65,14 @@ sub new
             bwa => 'bwa',
             samtools => 'samtools',
 
+            bwa_mem  => 1,
             aln_args => '] .$$self{aln_args}. q[',
 
             # optional filter to stream through, such as `samtools view -q25 -bu`
             filter => '',
+
+            # merge bams into one
+            merge  => 1,
 
             # split fastq's into smaller chunks to run in parallel
             reads_per_chunk => ] .$$self{reads_per_chunk}. q[,
@@ -71,9 +85,11 @@ sub new
         "About: Align fastq files via bwa\n" .
         "Usage: run-bwa\n" .
         "Options:\n" .
+        "   -a,  --aln-args <string>        Arguments to pass to bwa\n" .
         "   -b2, --bam-pe-list <file>       File with paired-end bam or cram files\n" .
         "   -f1, --fastq-se-list <file>     File with single-end fastq files\n" .
         "   -f2, --fastq-pe-list <file>     File with paired-end fastq files\n" .
+        "   -m,  --merge-bams               Merge bams\n" .
         "   -o,  --outdir <dir>             Output directory\n" .
         "   -r,  --ref-fa <file>            Reference sequence in fasta format\n" .
         "\n";
@@ -86,6 +102,8 @@ sub parse_args
     my ($self) = @_;
     while (defined(my $arg=shift(@ARGV)))
     {
+        if ( $arg eq '-m' or $arg eq '--merge' ) { $$self{merge}=1; next; }
+        if ( $arg eq '-a' or $arg eq '--aln-args' ) { $$self{aln_args}=shift(@ARGV); next; }
         if ( $arg eq '-b2' or $arg eq '--bam-pe-list' ) { $$self{bam_pe}=shift(@ARGV); next; }
         if ( $arg eq '-f1' or $arg eq '--fastq-se-list' ) { $$self{fastq_se}=shift(@ARGV); next; }
         if ( $arg eq '-f2' or $arg eq '--fastq-pe-list' ) { $$self{fastq_pe}=shift(@ARGV); next; }
@@ -97,6 +115,7 @@ sub parse_args
     if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
     if ( !defined($$self{fastq_pe}) && !defined($$self{fastq_se}) && !defined($$self{bam_pe}) ) { $self->throw("Expected the -f1, -f2 or -b2 option."); }
     if ( !defined($$self{fa_ref}) ) { $self->throw("Expected the -r option."); }
+    if ( exists($$self{bam_tag}) && !$$self{bwa_mem} ) { $self->throw("Need bwa_mem with bam_tag\n"); }
 }
 
 sub main
@@ -104,6 +123,7 @@ sub main
     my ($self) = @_;
     $self->parse_args();
     `mkdir -p $$self{outdir}`;
+    $self->save_config('bwa');
 
     if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
 
@@ -113,7 +133,12 @@ sub main
 
     for my $file (@files)
     {
-        if ( $$file{se} )
+        if ( 0 && $$self{bwa_mem} )
+        {
+            $self->set_limits(%{$$self{limits}}) unless (!exists($$self{limits}) or !exists($$self{bam_sort}));
+            $self->spawn('split_bam2fq',"$$self{outdir}/chunks/$$file{prefix}.chunks",$$file{bam});
+        }
+        elsif ( $$file{se} )
         {
             $self->spawn('split_fastq',"$$self{outdir}/chunks/$$file{prefix}.chunks",$$file{fastq});
         }
@@ -124,6 +149,7 @@ sub main
         }
         elsif ( $$file{bam_pe} )
         {
+            $self->set_limits(%{$$self{limits}}) unless (!exists($$self{limits}) or !exists($$self{bam_sort}));
             $self->spawn('split_bam',"$$self{outdir}/chunks/$$file{prefix}.chunks",$$file{bam});
         }
     }
@@ -133,7 +159,11 @@ sub main
     $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
     for my $file (@files)
     {
-        if ( $$file{se} )
+        if ( $$self{bwa_mem} )
+        {
+            # using bwa mem, no indexing step
+        }
+        elsif ( $$file{se} )
         {
             $$file{chunks} = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks");
             for my $chunk (@{$$file{chunks}}) { $self->spawn('bwa_aln',"$chunk.sai",$chunk,$$self{aln_args}); }
@@ -160,7 +190,31 @@ sub main
     # align
     for my $file (@files)
     {
-        if ( $$file{se} )
+        if ( $$self{bwa_mem} )
+        {
+            if ( $$file{pe} )
+            {
+                $$file{chunks1} = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks1");
+                $$file{chunks2} = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks2");
+            }
+            else
+            {
+                my $chunks = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks");
+                for my $chunk (@$chunks)
+                {
+                    my ($chunk1,$chunk2) = split(/\t/,$chunk);
+                    push @{$$file{chunks1}},$chunk1;
+                    push @{$$file{chunks2}},$chunk2;
+                }
+            }
+            for (my $i=0; $i<@{$$file{chunks1}}; $i++)
+            {
+                my $chunk1 = $$file{chunks1}[$i];
+                my $chunk2 = $$file{chunks2}[$i];
+                $self->spawn('bwa_mem',"$chunk1.bam",fastqs=>"$chunk1 $chunk2",rg=>$$file{rg_line});
+            }
+        }
+        elsif ( $$file{se} )
         {
             $$file{chunks} = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks");
             for my $chunk (@{$$file{chunks}})
@@ -182,7 +236,11 @@ sub main
         elsif ( $$file{bam_pe} )
         {
             $$file{chunks} = $self->list_chunks("$$self{outdir}/chunks/$$file{prefix}.chunks");
-            for my $chunk (@{$$file{chunks}}) { $self->spawn('bwa_sampe',"$chunk.bam",fastq1=>$chunk,fastq2=>$chunk,sai1=>"$chunk.sai1",sai2=>"$chunk.sai2",rg=>$$file{rg_line}); }
+            for my $chunk (@{$$file{chunks}})
+            {
+                $self->throw("Is this correct for bwa sampe: fastq1=fastq2=$chunk??!\n");
+                $self->spawn('bwa_sampe',"$chunk.bam",fastq1=>$chunk,fastq2=>$chunk,sai1=>"$chunk.sai1",sai2=>"$chunk.sai2",rg=>$$file{rg_line}); 
+            }
         }
     }
     $self->wait;
@@ -190,7 +248,11 @@ sub main
     # merge
     for my $file (@files)
     {
-        if ( $$file{se} )
+        if ( $$self{bwa_mem} )
+        {
+            $self->spawn('merge',"$$self{outdir}/bams/$$file{aln}",$$file{chunks1});
+        }
+        elsif ( $$file{se} )
         {
             $self->spawn('merge',"$$self{outdir}/bams/$$file{aln}",$$file{chunks});
         }
@@ -205,11 +267,35 @@ sub main
     }
     $self->wait;
 
+    if ( $$self{merge} )
+    {
+        my @bams = ();
+        for my $file (@files) { push @bams,"$$self{outdir}/bams/$$file{prefix}"; }
+        $self->spawn('merge',"$$self{outdir}/merged.bam",\@bams);
+    }
+    $self->wait;
+
     # clean
     $self->clean(@files);
 
-#    $self->cmd("touch $$self{outdir}/all_done");
+    $self->cmd("touch $$self{outdir}/all_done");
     $self->all_done;
+}
+
+sub save_config
+{
+    my ($self,$name) = @_;
+    if ( !defined $$self{_config} ) { return; }
+    my $src = $$self{_config};
+    my $dst = "$$self{outdir}/$name.conf";
+    if ( -e $dst && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst");
 }
 
 sub clean
@@ -217,7 +303,21 @@ sub clean
     my ($self,@files) = @_;
     for my $file (@files)
     {
-        if ( $$file{se} )
+        if ( $$self{bwa_mem} )
+        {
+            for my $chunk (@{$$file{chunks1}})
+            {
+                unlink("$chunk");
+                unlink("$chunk.bam");
+                unlink("$chunk.bam.bai");
+            }
+            for my $chunk (@{$$file{chunks2}})
+            {
+                unlink("$chunk");
+            }
+            unlink("$$self{outdir}/$$file{prefix}.chunks");
+        }
+        elsif ( $$file{se} )
         {
             for my $chunk (@{$$file{chunks}})
             {
@@ -267,6 +367,7 @@ sub list_se_files
 {
     my ($self,$list) = @_;
     my @files = ();
+    my $names = {};
     if ( !defined $list ) { return @files; }
     open(my $fh,'<',$list) or $self->throw("$list: $!");
     while (my $line=<$fh>)
@@ -275,8 +376,19 @@ sub list_se_files
         chomp($items[-1]);
         my $file = $items[0];
         my $aln  = $items[1];
-        if ( !($aln=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $aln"); }
-        my $prefix = $`;
+        my $prefix;
+        if ( $aln eq '-' )
+        {
+            if ( $items[2]=~/SM:([^\\]+)/ ) { $prefix = unique_name($names,$1); }
+            elsif ( $file=~m{([^/]+)\.[^/]+$} ) { $prefix = unique_name($names,$1); }
+            else { $prefix = unique_name($names,"xxx"); }
+            $aln = "$prefix.bam";
+        }
+        elsif ( $aln=~m{\.[^\.]+$} )
+        {
+            $prefix = $`;
+        }
+        else { $self->throw("Could not parse file name: $aln"); }
         my $out = { se=>1, fastq=>$file, aln=>$aln, prefix=>$prefix, rg_line=>$items[2] };
         push @files, $out;
     }
@@ -287,17 +399,30 @@ sub list_pe_files
 {
     my ($self,$list) = @_;
     my @files = ();
+    my $names = {};
     if ( !defined $list ) { return @files; }
     open(my $fh,'<',$list) or $self->throw("$list: $!");
     while (my $line=<$fh>)
     {
         my @items = split(/\s+/,$line);
+        if ( @items!=3 ) { $self->throw("Expected: file1.fastq,file2.fastq  [out.bam|-]  \@RG\\tID:lane1\\tSM:60A_Sc_DBVPG6044"); }
         chomp($items[-1]);
         my ($file1,$file2) = split(/,/,$items[0]);
         if ( !defined $file2 ) { $self->throw("Expected two file names separated with a comma, got: $items[0]\n"); }
         my $aln = $items[1];
-        if ( !($aln=~m{\.[^\.]+$} ) ) { $self->throw("Could not parse file name: $aln"); }
-        my $prefix = $`;
+        my $prefix;
+        if ( $aln eq '-' )
+        {
+            if ( $items[2]=~/SM:([^\\]+)/ ) { $prefix = unique_name($names,$1); }
+            elsif ( $file1=~m{([^/]+)\.[^/]+$} ) { $prefix = unique_name($names,$1); }
+            else { $prefix = unique_name($names,"xxx"); }
+            $aln = "$prefix.bam";
+        }
+        elsif ( $aln=~m{\.[^\.]+$} )
+        {
+            $prefix = $`;
+        }
+        else { $self->throw("Could not parse file name: $aln"); }
         my $out = { pe=>1, fastq1=>$file1, fastq2=>$file2, aln=>$aln, prefix=>$prefix, rg_line=>$items[2] };
         push @files, $out;
     }
@@ -332,23 +457,37 @@ sub list_bam_files
             if ( $file=~/^#/ ) { next; }
             $file =~ s/^\s*//;
             $file =~ s/\s*$//;
-            my @hdr  = $self->cmd("$$self{samtools} view -H $file");
             my @rg   = ();
             my $smpl = undef;
-            for my $line (@hdr)
+            my ($fname,$hdr) = split(/\t/,$file);
+            if ( defined $hdr && $hdr=~/^\@/ ) 
             {
-                if ( !($line=~/^\@RG/) )  { next; }
-                for my $item (split(/\t/,$line))
-                { 
-                    chomp($item);
-                    if ( $item=~/^ID:/ ) { push @rg,$item; }
-                    if ( $item=~/^PU:/ ) { push @rg,$item; }
-                    if ( $item=~/^LB:/ ) { push @rg,$item; }
-                    if ( $item=~/^SM:/ ) { push @rg,$item; $smpl = $'; }
-                    if ( $item=~/^PL:/ ) { push @rg,$item; }
-                    if ( $item=~/^CN:/ ) { push @rg,$item; }
+                $file = $fname;
+                @rg = split(/\\t/,$hdr);
+                chomp($rg[-1]);
+                for my $rg (@rg)
+                {
+                    if ( $rg=~/^SM:/ ) { $smpl = $'; }
                 }
-                last; 
+            }
+            else
+            {
+                my @hdr  = $self->cmd("$$self{samtools} view -H $file");
+                for my $line (@hdr)
+                {
+                    if ( !($line=~/^\@RG/) )  { next; }
+                    for my $item (split(/\t/,$line))
+                    { 
+                        chomp($item);
+                        if ( $item=~/^ID:/ ) { push @rg,$item; }
+                        if ( $item=~/^PU:/ ) { push @rg,$item; }
+                        if ( $item=~/^LB:/ ) { push @rg,$item; }
+                        if ( $item=~/^SM:/ ) { push @rg,$item; $smpl = $'; }
+                        if ( $item=~/^PL:/ ) { push @rg,$item; }
+                        if ( $item=~/^CN:/ ) { push @rg,$item; }
+                    }
+                    last; 
+                }
             }
             if ( !@rg ) { $self->throw("No \@RG line in $file?\n"); }
             if ( !$smpl ) { $self->throw("No \@RG SM field in $file?\n"); }
@@ -392,7 +531,17 @@ sub split_fastq
 {
     my ($self,$outfile,$infile) = @_;
     open(my $list,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
-    open(my $in,"gunzip -c $infile |") or $self->throw("gunzip -c $infile failed: $!");
+    my ($in,$cmd);
+    if ( $infile=~/\.gz$/ )
+    {
+        $cmd = "gunzip -c $infile";
+        open($in,"$cmd |") or $self->throw("$cmd: $!");
+    }
+    else
+    {
+        $cmd = $infile;
+        open($in,'<',$cmd) or $self->throw("$cmd: $!");
+    }
     my $out    = undef;
     my $nout   = 0;
     my $ichunk = 0;
@@ -418,13 +567,111 @@ sub split_fastq
     {
         close($out) or $self->throw("close failed: $outfile.$ichunk");
     }
+    close($in) or ($$self{debug_chunks} || $self->throw("close failed: $cmd"));
+    close($list) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+sub split_bam2fq
+{
+    my ($self,$outfile,$infile) = @_;
+    if ( $$self{bam_sort} )
+    {
+        if ( !$self->is_finished("$outfile.sort.bam") )
+        {
+            my $cmd = $$self{bam_sort};
+            $cmd =~ s/{IN}/$infile/;
+            $cmd =~ s/{OUT}/$outfile.sort.part/;
+            $self->cmd($cmd);
+            rename("$outfile.sort.part.bam","$outfile.sort.bam") or $self->throw("rename $outfile.sort.part.bam $outfile.sort.bam: $!");
+        }
+        $infile = "$outfile.sort.bam";
+    }
+    open(my $list,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    open(my $in,"$$self{samtools} view $infile |") or $self->throw("$$self{samtools} view $infile failed: $!");
+    my $out1   = undef;
+    my $out2   = undef;
+    my $nout   = 0;
+    my $ichunk = 0;
+    my @buf    = ();
+    my $ntot   = 0;
+    my $nwr    = 0;
+    my $bam_tag = $$self{bam_tag} ? "$$self{bam_tag}:" : 0;
+    while (my $line=<$in>)
+    {
+        $ntot++;
+        my @vals = split(/\t/,$line);
+        my $name = $vals[0];
+        my $flag = $vals[1];
+        my $seq  = $vals[9];
+        my $qual = $vals[10];
+        my $tag  = undef;
+        if ( $bam_tag )
+        {
+            for (my $i=11; $i<@vals; $i++)
+            {
+                if ( substr($vals[$i],0,3) eq $bam_tag ) { $tag = $vals[$i]; last; }
+            }
+            if ( !defined $tag ) { next; }
+        }
+        push @buf, { name=>$name, seq=>$seq, qual=>$qual, tag=>$tag, flag=>$flag };
+
+        if ( @buf==1 ) { next; }
+        if ( $buf[0]{name} ne $buf[1]{name} ) { shift @buf; next; }
+
+        if ( $nout >= $$self{reads_per_chunk} )
+        {
+            close($out1) or $self->throw("close failed: $outfile.1.$ichunk");
+            close($out2) or $self->throw("close failed: $outfile.2.$ichunk");
+            $out1 = undef;
+            $out2 = undef;
+        }
+        if ( !defined $out1 )
+        {
+            $nout = 0;
+            $ichunk++;
+            if ( $$self{debug_chunks} && $ichunk > $$self{debug_chunks} ) { last; }
+            open($out1,"| gzip -c > $outfile.1.$ichunk") or $self->throw("gzip -c > $outfile.1.$ichunk: $!");
+            open($out2,"| gzip -c > $outfile.2.$ichunk") or $self->throw("gzip -c > $outfile.2.$ichunk: $!");
+            print $list "$outfile.1.$ichunk\t$outfile.2.$ichunk\n";
+        }
+        if ( $buf[0]{flag} & 0x80 )
+        {
+            my $tmp = $buf[0]; $buf[0] = $buf[1]; $buf[1] = $tmp;
+        }
+        print $out1 '@'.$buf[0]{name}."\t".$buf[0]{tag}."\n".$buf[0]{seq}."\n+\n".$buf[0]{qual}."\n";
+        print $out2 '@'.$buf[1]{name}."\t".$buf[1]{tag}."\n".$buf[1]{seq}."\n+\n".$buf[1]{qual}."\n";
+        splice(@buf,0,2);
+        $nout++;
+        $nwr+=2;
+    }
+    if ( defined $out1 )
+    {
+        close($out1) or $self->throw("close failed: $outfile.1.$ichunk");
+        close($out2) or $self->throw("close failed: $outfile.2.$ichunk");
+    }
     close($in) or ($$self{debug_chunks} || $self->throw("close failed: gunzip -c $infile failed"));
     close($list) or $self->throw("close failed: $outfile.part");
+    open(my $fh,'>',"$$self{outdir}/split-bam2fq-stats.txt") or $self->throw("$$self{outdir}/split-bam2fq-stats.txt: $!");
+    print $fh "reads_total\t$ntot\n";
+    print $fh "reads_written\t$nwr\n";
+    close($fh) or $self->throw("close failed: $$self{outdir}/split-bam2fq-stats.txt");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 sub split_bam
 {
     my ($self,$outfile,$infile) = @_;
+    if ( $$self{bam_sort} )
+    {
+        if ( !$self->is_finished("$outfile.sort.bam") )
+        {
+            my $cmd = $$self{bam_sort};
+            $cmd =~ s/{IN}/$infile/;
+            $cmd =~ s/{OUT}/$outfile.sort.part/;
+            $self->cmd($cmd);
+            rename("$outfile.sort.part.bam","$outfile.sort.bam") or $self->throw("rename $outfile.sort.part.bam $outfile.sort.bam: $!");
+        }
+        $infile = "$outfile.sort.bam";
+    }
     open(my $list,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
     open(my $in,"$$self{samtools} view -h $infile |") or $self->throw("$$self{samtools} view -h $infile failed: $!");
     my $out    = undef;
@@ -465,6 +712,7 @@ sub split_bam
     }
     close($in) or ($$self{debug_chunks} || $self->throw("close failed: $$self{samtools} view -h $infile failed"));
     close($list) or $self->throw("close failed: $outfile.part");
+    unlink("$outfile.sort.bam");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -541,6 +789,25 @@ sub bwa_samse
         $filter .= ' |';
     }
     $self->cmd(qq[$$self{bwa} samse $$self{fa_ref} -r '$rg_line' $sai $fastq | $filter $$self{samtools} sort -o $bam.part]);
+    $self->cmd("$$self{samtools} index $bam.part");
+    rename("$bam.part.bai","$bam.bai") or $self->throw("rename $bam.part.bai $bam.bai: $!");
+    rename("$bam.part",$bam) or $self->throw("rename $bam.part $bam: $!");
+}
+sub bwa_mem
+{
+    my ($self,$bam,%args) = @_;
+    my $fastqs   = $args{fastqs};   # one or two fastq fils
+    my $rg_line  = $args{rg};
+    my $filter   = $$self{filter} ? $$self{filter} : '';
+    if ( $filter )
+    {
+        $filter  =~ s/^\s*\|//;
+        $filter  =~ s/\|\s*$//;
+        $filter .= ' |';
+    }
+    my $args = $$self{bam_tag} ? '-C' : '';
+    if ( $$self{aln_args} ne '' ) { $args .= " $$self{aln_args}"; }
+    $self->cmd(qq[$$self{bwa} mem $args $$self{fa_ref} -R '$rg_line' $fastqs | $filter $$self{samtools} sort -o $bam.part]);
     $self->cmd("$$self{samtools} index $bam.part");
     rename("$bam.part.bai","$bam.bai") or $self->throw("rename $bam.part.bai $bam.bai: $!");
     rename("$bam.part",$bam) or $self->throw("rename $bam.part $bam: $!");

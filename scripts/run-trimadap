@@ -1,0 +1,177 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{exec} = 'AdapterRemoval --trimns --trimqualities --mm 3 --minlength 25 --qualitybase 33';
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            # List of fastq files, one file per line
+            fastq_se  => undef,
+
+            # Same as fastq_se, but comma-separated pairs of input files:
+            #   file1.fastq,file2.fastq
+            fastq_pe  => undef,
+
+            # executables
+            exec => '] .$$self{exec}. q[',
+
+    ]."\n";
+
+    $$self{usage} .= 
+        "About: Remove adapters using AdapterRemoval\n" .
+        "Usage: run-adapter-removal\n" .
+        "Options:\n" .
+        "   -f1, --fastq-se-list <file>     File with single-end fastq files\n" .
+        "   -f2, --fastq-pe-list <file>     File with paired-end fastq files\n" .
+        "   -o,  --outdir <dir>             Output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f1' or $arg eq '--fastq-se-list' ) { $$self{fastq_se}=shift(@ARGV); next; }
+        if ( $arg eq '-f2' or $arg eq '--fastq-pe-list' ) { $$self{fastq_pe}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw("Unknown argument: $arg\n");
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{fastq_pe}) && !defined($$self{fastq_se}) ) { $self->throw("Expected the -f1 or -f2 option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+
+    my @files = ();
+    @files = (@files,$self->list_files($$self{fastq_se})) unless !$$self{fastq_se};
+    @files = (@files,$self->list_files($$self{fastq_pe})) unless !$$self{fastq_pe};
+
+    for my $file (@files)
+    {
+        $self->spawn('adapter_removal',"$$self{outdir}/$$file{name}.done",$file);
+    }
+    $self->wait;
+
+    $self->create_io_mapping(\@files);
+
+    $self->all_done;
+}
+
+sub unique_name
+{
+    my ($self,$names,$file) = @_;
+    $file =~ s/\.gz//i;
+    $file =~ s/\.fastq//i;
+    $file =~ s/\.fq//i;
+    my $new_name = $file;
+    $new_name =~ s{^.*/}{};     # strip directory
+    my $idx = 1;
+    while ( exists($$names{$new_name}) )
+    {
+        $new_name = $file .'_'. $idx;
+        $idx++;
+    }
+    $$names{$new_name} = 1;
+    return $new_name;
+}
+sub list_files
+{
+    my ($self,$list) = @_;
+    my @files = ();
+    my %names = ();
+    open(my $fh,'<',$list) or $self->throw("$list: $!");
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        if ( !($line=~/^(\S+)/) ) { $self->throw("Could not parse: $line"); }
+        my $file = $1;
+        my $rest = $';
+        if ( $file=~/,/ )
+        {
+            my $file1 = $`;
+            my $file2 = $';
+            my $name = $self->unique_name(\%names,$file1);
+            push @files, {pe=>1,infile1=>$file1,infile2=>$file2,outfile1=>"$$self{outdir}/$name.1.fastq.gz",outfile2=>"$$self{outdir}/$name.2.fastq.gz",name=>$name,rest=>$rest};
+        }
+        else
+        {
+            my $name = $self->unique_name(\%names,$file);
+            push @files, {se=>1,infile=>$file,outfile=>"$$self{outdir}/$name.fastq.gz",name=>$name,rest=>$rest};
+        }
+    }
+    close($fh) or $self->throw("close failed: $list");
+    return @files;
+}
+sub adapter_removal
+{
+    my ($self,$outfile,$dat) = @_;
+    if ( $$dat{se} )
+    {
+        $self->cmd("$$self{exec} --basename $$self{outdir}/$$dat{name} --file1 $$dat{infile} --gzip --output1 $$dat{outfile}");
+    }
+    else
+    {
+        $self->cmd("$$self{exec} --basename $$self{outdir}/$$dat{name} --file1 $$dat{infile1} --file2 $$dat{infile2} --gzip --output1 $$dat{outfile1} --output2 $$dat{outfile2}");
+    }
+    $self->cmd("touch $outfile");
+}
+
+sub create_io_mapping
+{
+    my ($self,$files) = @_;
+    for my $type ('se','pe')
+    {
+        my $io_map = "$$self{outdir}/io-mapping-$type.txt";
+        if ( $self->is_finished($io_map) ) { next; }
+        open(my $fh,'>',"$io_map.part") or $self->throw("$io_map.part: $!");
+        for my $dat (@$files)
+        {
+            if ( !$$dat{$type} ) { next; }
+            if ( $$dat{se} )
+            {
+                print $fh "$$dat{infile}\t$$dat{outfile}$$dat{rest}\n";
+            }
+            else
+            {
+                print $fh "$$dat{infile1},$$dat{infile2}\t$$dat{outfile1},$$dat{outfile2}$$dat{rest}\n";
+            }
+        }
+        close($fh) or $self->throw("close failed: $io_map.part");
+        rename("$io_map.part",$io_map) or $self->throw("rename $io_map.part $io_map: $!");
+    }
+}
+

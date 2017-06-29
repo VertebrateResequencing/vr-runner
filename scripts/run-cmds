@@ -1,0 +1,166 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{java_memstep}   = 2000;
+
+    $$self{usage} .= 
+        "About: Small pipeline to parallelize series of commands\n" .
+        "Usage: run-cmds\n" .
+        "Options:\n" .
+        "   -C, --cmd <cmd>         Command to run\n" .
+        "   -c, --cmds <file>       List of commands to run\n" .
+        "   -l, --limits <string>   Limits to use, e.g. runtime=60,memory=5000\n" .
+        "   -t, --tmpdir <dir>      Directory for temporary files\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    my $limits = undef;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-C' or $arg eq '--cmd' ) { $$self{cmd}=shift(@ARGV); next; }
+        if ( $arg eq '-c' or $arg eq '--cmds' ) { $$self{inlist}=shift(@ARGV); next; }
+        if ( $arg eq '-l' or $arg eq '--limits' ) { $limits=shift(@ARGV); next; }
+        if ( $arg eq '-t' or $arg eq '--tmpdir' ) { $$self{tmpdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{tmpdir}) ) { $self->throw("Expected the -t option."); }
+    if ( !defined($$self{inlist}) && !defined($$self{cmd}) ) { $self->throw("Expected the -c or -C option."); }
+    if ( defined($limits) )
+    {
+        for my $limit (split(/,/,$limits))
+        {
+            my ($key,$val) = split(/=/,$limit);
+            $$self{limits}{$key} = $val;
+        }
+    }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    my @cmds = $self->list_cmds();
+    if ( !@cmds ) { $self->throw("No commands to run?\n"); }
+    `mkdir -p $$self{tmpdir} && mkdir -p $$self{tmpdir}/done`;
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+
+    for (my $i=0; $i<@cmds; $i++)
+    {
+        $self->spawn('run_command',"$$self{tmpdir}/done/$i.done",$cmds[$i]);
+    }
+    $self->wait;
+
+    $self->all_done;
+}
+
+sub list_cmds
+{
+    my ($self) = @_;
+
+    my @cmds = ();
+    if ( defined $$self{inlist} )
+    {
+        my $file = $$self{inlist};
+        open(my $fh,'<',$file) or $self->throw("$file: $!");
+        while (my $cmd=<$fh>)
+        {
+            if ( $cmd=~/^\s*$/ ) { next; }
+            if ( $cmd=~/^#/ ) { next; }
+            $cmd =~ s/^\s*//;
+            $cmd =~ s/\s*$//;
+            push @cmds,$cmd;
+        }
+        close($fh) or $self->throw("close failed: $file");
+    }
+    if ( defined $$self{cmd} )
+    {
+        push @cmds,$$self{cmd};
+    }
+    return @cmds;
+}
+
+sub run_command
+{
+    my ($self,$outfile,$cmd) = @_;
+
+    if ( $cmd=~/^\S*java\s+/ && $cmd=~/\s+-Xm[sx](\S+)/ )
+    {
+        my $xmx = $1;
+        if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1000; }
+        elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+
+        my $mem = int($self->get_limits('memory') * 0.9);
+        if ( $mem<=0 ) { $mem = 500; }
+        if ( $mem < $xmx ) { $mem = $xmx; }
+
+        $cmd =~ s/-Xms\S+/-Xms${mem}m/;
+        $cmd =~ s/-Xmx\S+/-Xmx${mem}m/;
+
+        $self->java_cmd($cmd,"$outfile.java");
+    }
+    else
+    {
+        $self->cmd($cmd,verbose=>1);
+    }
+    $self->cmd("touch $outfile");
+}
+
+sub java_cmd
+{
+    my ($self,$cmd,$err_file) = @_;
+
+    print STDERR "$cmd >$err_file 2>&1\n";
+    if ( -e $err_file ) { `(cat $err_file; echo;) >> $err_file.prev`; unlink($err_file); }
+
+    `$cmd >$err_file 2>&1`;
+    if ( ! $? ) { return; } # finished OK
+
+    # something went wrong
+    my $out_of_memory = 0;
+    open(my $fh,'<',$err_file) or $self->throw("$err_file: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/java.lang.OutOfMemoryError/ ) { $out_of_memory = 1; last; }
+        if ( $line=~/Could not create the Java virtual machine/ ) { $out_of_memory = 1; last; }
+    }
+    close($fh);
+    if ( !$out_of_memory ) { $self->throw("The command failed: $cmd\n"); }
+
+    # out of memory: tell the runner to use more memory next time
+    my $mem = $self->get_limits('memory') + $$self{java_memstep};
+    $self->set_limits(memory=>$mem);
+
+    $self->throw("Memory limit exceeded, increasing the memory limit for the next run to $mem. The command was:\n$cmd\n");
+}
+

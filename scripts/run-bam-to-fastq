@@ -36,6 +36,9 @@ sub new
             # List of bams
             bams => undef,
 
+            # List of bams to samples names
+            samples => undef,
+
             # executables
             samtools => 'samtools',
 
@@ -98,18 +101,21 @@ sub main
     }
     else
     {
-        $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+        my @list = ();
         for my $file (@files)
         {
-            if ( $self->is_finished("$$self{outdir}/$$file{name}.fastq.gz") ) { next; }
-            $self->spawn('sort_bam',"$$self{outdir}/$$file{name}.nsorted.bam",$file);
+            my $fname   = "$$self{outdir}/fastq/$$file{name}";
+            $$file{out} = "$fname.1.fastq.gz,$fname.2.fastq.gz";
+            push @list,"$fname.1.fastq.gz,$fname.2.fastq.gz";
+            $self->spawn('bam2fq',"$fname.1.fastq.gz","$fname.2.fastq.gz","$fname.0.fastq.gz",$file);
         }
         $self->wait;
-        $self->set_limits(memory=>undef);
+        $self->save_list("$$self{outdir}/fastq.list",\@list);
 
-        for my $file (@files)
+        if ( defined $$self{samples} )
         {
-            $self->spawn('bam2fq',"$$self{outdir}/$$file{name}.fastq.gz",$file);
+            $self->spawn('bam_to_samples',$$self{samples},\@files);
+            $self->wait;
         }
     }
 
@@ -128,6 +134,17 @@ sub clean
     $self->SUPER::clean($$self{outdir});
 }
 
+sub save_list
+{
+    my ($self,$file,$list) = @_;
+    open(my $fh,'>',$file) or $self->throw("$file: $!");
+    for my $file (@$list)
+    {
+        print $fh "$file\n";
+    }
+    close($fh) or $self->throw("close failed: $file");
+}
+
 sub list_files
 {
     my ($self,$list) = @_;
@@ -139,7 +156,7 @@ sub list_files
         my @items = split(/\s+/,$line);
         chomp($items[-1]);
         my $file = $items[0];
-        if ( !($file=~m{/(.+)\.bam$}i ) ) { $self->throw("Could not parse file name: $file"); }
+        if ( !($file=~m{/(.+)\.bam$}i) && !($file=~m{/(.+)\.cram$}i) ) { $self->throw("Could not parse file name: $file"); }
         my $name = $self->unique_name($names,$1);
         push @files, { src=>$items[0], name=>$name };
     }
@@ -176,10 +193,8 @@ sub sort_bam
 
 sub bam2fq
 {
-    my ($self,$outfile,$file) = @_;
-
-    my $infile = "$$self{outdir}/$$file{name}.nsorted.bam";
-    $self->cmd("$$self{samtools} view -F0xf00 -u $infile | $$self{samtools} bam2fq | gzip -c > $outfile.part");
+    my ($self,$outfile,$out2,$out0,$file) = @_;
+    $self->cmd("$$self{samtools} collate -Ou $$file{src} $outfile.tmp | $$self{samtools} bam2fq -F0xf00 -1 $outfile.part -2 $out2 -0 $out0 -");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -219,5 +234,34 @@ sub java_cmd
     $self->set_limits(memory=>$mem);
 
     $self->throw("Memory limit exceeded, increasing the memory limit for the next run to $mem. The command was:\n$cmd\n");
+}
+
+sub bam_to_samples
+{
+    my ($self,$outfile,$files) = @_;
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    for my $file (@$files)
+    {
+        open(my $hdr,"$$self{samtools} view -H $$file{src} |") or $self->throw("$$self{samtools} view -H $$file{src}: $!");
+        while (my $line=<$hdr>)
+        {
+            my @items = split(/\t/,$line);
+            if ( $items[0] ne '@RG' ) { next; }
+            my ($id,$sm,$lb);
+            for my $item (@items)
+            {
+                if ( $item=~/^ID:/ ) { $id = $item; next; }
+                if ( $item=~/^SM:/ ) { $sm = $item; next; }
+                if ( $item=~/^LB:/ ) { $lb = $item; next; }
+            }
+            if ( !defined $id ) { $self->throw("\@RG ID not defined: $file"); }
+            if ( !defined $sm ) { $self->throw("\@RG SM not defined: $file"); }
+            if ( !defined $lb ) { $self->throw("\@RG LB not defined: $file"); }
+            print $fh "$$file{src}\t$$file{out}\t\@RG\\t$id\\t$sm\\t$lb\n";
+        }
+        close($hdr) or $self->throw("close failed: $$self{samtools} view -H $$file{src}");
+    }
+    close($fh) or $self->throw("close failed: $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
