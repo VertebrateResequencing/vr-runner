@@ -28,8 +28,10 @@ sub new
     $$self{reads_per_chunk} = 100_000;
     $$self{samtools} = 'samtools';
     $$self{bwa}      = 'bwa';
+    $$self{picard}   = 'java -Xms5G -Xmx5G -jar ~/lib/picard-1.135.jar MarkDuplicates VALIDATION_STRINGENCY=SILENT';
     $$self{bwa_mem}  = 1;
     $$self{merge}    = 0;
+    $$self{rmdup}    = 0;
     $$self{aln_args} = '';
     $$self{limits}   = { memory=>3_500 };
     $$self{config_version} = '1427807557';
@@ -62,8 +64,9 @@ sub new
             fa_ref => undef,
 
             # executables
-            bwa => 'bwa',
-            samtools => 'samtools',
+            bwa      => '] .$$self{bwa}. q[',
+            samtools => '] .$$self{samtools}. q[',
+            picard   => '] .$$self{picard}. q[',
 
             bwa_mem  => 1,
             aln_args => '] .$$self{aln_args}. q[',
@@ -72,7 +75,10 @@ sub new
             filter => '',
 
             # merge bams into one
-            merge  => 1,
+            merge  => 0,
+
+            # run duplicate removal (picard)
+            rmdup  => 0,
 
             # split fastq's into smaller chunks to run in parallel
             reads_per_chunk => ] .$$self{reads_per_chunk}. q[,
@@ -89,8 +95,8 @@ sub new
         "   -b2, --bam-pe-list <file>       File with paired-end bam or cram files\n" .
         "   -f1, --fastq-se-list <file>     File with single-end fastq files\n" .
         "   -f2, --fastq-pe-list <file>     File with paired-end fastq files\n" .
-        "   -m,  --merge-bams               Merge bams\n" .
         "   -o,  --outdir <dir>             Output directory\n" .
+        "   -O,  --options <list>           Options, eg. merge:1,rmdup:1\n" .
         "   -r,  --ref-fa <file>            Reference sequence in fasta format\n" .
         "\n";
 
@@ -102,7 +108,17 @@ sub parse_args
     my ($self) = @_;
     while (defined(my $arg=shift(@ARGV)))
     {
-        if ( $arg eq '-m' or $arg eq '--merge' ) { $$self{merge}=1; next; }
+        if ( $arg eq '-O' or $arg eq '--options' )
+        {
+            my $opts = shift(@ARGV);
+            my @opts = split(/,/,$opts);
+            for my $opt (@opts)
+            {
+                my ($key,$val) = split(/:/,$opt);
+                $$self{$key} = $val;
+            }
+            next; 
+        }
         if ( $arg eq '-a' or $arg eq '--aln-args' ) { $$self{aln_args}=shift(@ARGV); next; }
         if ( $arg eq '-b2' or $arg eq '--bam-pe-list' ) { $$self{bam_pe}=shift(@ARGV); next; }
         if ( $arg eq '-f1' or $arg eq '--fastq-se-list' ) { $$self{fastq_se}=shift(@ARGV); next; }
@@ -116,6 +132,21 @@ sub parse_args
     if ( !defined($$self{fastq_pe}) && !defined($$self{fastq_se}) && !defined($$self{bam_pe}) ) { $self->throw("Expected the -f1, -f2 or -b2 option."); }
     if ( !defined($$self{fa_ref}) ) { $self->throw("Expected the -r option."); }
     if ( exists($$self{bam_tag}) && !$$self{bwa_mem} ) { $self->throw("Need bwa_mem with bam_tag\n"); }
+}
+
+sub set_java_memory
+{
+    my ($self,$cmd) = @_;
+
+    if ( !($cmd =~ /-Xmx(\S+)/) && !($cmd =~ /-Xms(\S+)/) ) { return; }
+
+    my $xmx = $1;
+    if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1024; }
+    elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+
+    $xmx *= 1.15;
+
+    $self->set_limits(memory=>$xmx);
 }
 
 sub main
@@ -274,6 +305,13 @@ sub main
         $self->spawn('merge',"$$self{outdir}/merged.bam",\@bams);
     }
     $self->wait;
+
+    if ( $$self{rmdup} )
+    {
+        $self->set_java_memory($$self{picard});
+        $self->spawn('rmdup',"$$self{outdir}/merged.rmdup.bam","$$self{outdir}/merged.bam");
+        $self->wait;
+    }
 
     # clean
     $self->clean(@files);
@@ -848,4 +886,14 @@ sub merge
     rename("$bam.part.bai","$bam.bai") or $self->throw("rename $bam.part.bai $bam.bai: $!");
     rename("$bam.part",$bam) or $self->throw("rename $bam.part $bam: $!");
 }
+
+sub rmdup
+{
+    my ($self,$outfile,$bam) = @_;
+    $self->cmd("$$self{picard} I=$bam O=$outfile.part M=$outfile.txt",java_err_file=>"$outfile.java");
+    $self->cmd("$$self{samtools} index $outfile.part");
+    rename("$outfile.part.bai","$outfile.bai") or $self->throw("rename $outfile.part.bai $outfile.bai: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
 
