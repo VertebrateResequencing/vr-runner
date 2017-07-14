@@ -1,1 +1,191 @@
-/nfs/users/nfs_p/pd3/wtxt/logs/sandbox/vgp/polishing/run-scalpel
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{chunk_size} = 1_000_000;
+    $$self{scalpel}  = "/nfs/vertres04/user/pd3/svn/scalpel/scalpel-0.5.3"; 
+    $$self{limits}   = { runtime=>24*60, memory=>5_000 };
+    $$self{do_clean} = 1;
+
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            #  config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            chunk_size => '] .$$self{chunk_size}.  q[',
+            scalpel    => '] .$$self{scalpel}.  q[',
+            fasta      => undef,
+            bam        => undef,
+
+            limits     => { runtime=>24*60, memory=>10_000 },
+            do_clean   => 1,
+    ]."\n";
+
+
+    $$self{usage} .= 
+        "About: Run scalpel\n" .
+        "Usage: run-scalpel\n" .
+        "Options:\n" .
+        "   -b, --bam <file>        \n" .
+        "   -f, --fasta <file>      \n" .
+        "   -o, --outdir <dir>      \n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bam' ) { $$self{bam}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{bam}) ) { $self->throw("Expected the -b option."); }
+    if ( !defined($$self{fasta}) ) { $self->throw("Expected the -f option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
+    my $chunks = $self->read_fai("$$self{fasta}.fai");
+    if ( !@$chunks ) { $self->throw("No chunks to run?\n"); }
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+
+    # chunks:
+    #   - chr
+    #   - beg
+    #   - end
+    #   + dir .. full path
+    for my $chunk (@$chunks)
+    {
+        my $dir = "$$self{outdir}/$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
+        $$chunk{dir} = $dir;
+        $self->spawn('run_scalpel',"$dir/done",$chunk);
+    }
+    $self->wait;
+
+    $self->spawn('merge',"$$self{outdir}/merged.bcf",$chunks);
+    $self->wait;
+
+    $self->clean($chunks);
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,$chunks) = @_;
+    if ( !$$self{do_clean} )  { return; }
+    $self->SUPER::clean($$self{outdir});
+    for my $chunk (@$chunks)
+    {
+        $self->cmd("rm -rf $$chunk{dir}");
+    }
+}
+
+sub index_part
+{
+    my ($self,$vcf) = @_;
+    $self->cmd("bcftools index -f $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
+}
+
+sub merge
+{
+    my ($self,$outfile,$chunks) = @_;
+    open(my $fh,'>',"$outfile.list") or $self->throw();
+    for my $chunk (@$chunks)
+    {
+        print $fh "$$chunk{dir}/variants.indel.vcf.gz\n";
+    }
+    close($fh) or $self->throw("close failed: $!");
+
+    $self->cmd("bcftools concat -a -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools norm -f $$self{fasta} -Ob -o $outfile.part");
+    unlink("$$self{outdir}/merged.bcf.list");
+    $self->index_part($outfile);
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    # Determine the chromosomes and their lengths
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    my @chunks = ();
+    while (my $line=<$fh>)
+    {
+        my ($chr,$end,undef) = split(/\t/,$line);
+        my $beg = 1;
+        push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
+        if ( !$$self{chunk_size} or $chunks[-1]{end} - $chunks[-1]{beg} + 1 < $$self{chunk_size} ) { next; }
+
+        # chunk the contigs into smaller pieces
+        while ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 > $$self{chunk_size} )
+        {
+            my $beg = $chunks[-1]{beg} + $$self{chunk_size};
+            my $end = $chunks[-1]{end};
+            $chunks[-1]{end} = $beg - 1;
+            push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
+        }
+
+        # if last chunk is too small, make the previous bigger
+        if ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 < 0.3*$$self{chunk_size} )
+        {
+            my $end = $chunks[-1]{end};
+            pop @chunks;
+            $chunks[-1]{end} = $end;
+        }
+    }
+    close($fh);
+
+    if ( !@chunks ) { $self->throw("No sequences read from $fai??"); }
+    return \@chunks;
+}
+
+sub run_scalpel
+{
+    my ($self,$outfile,$chunk) = @_;
+    my $cmd = "$$self{scalpel}/scalpel-discovery --single --bam $$self{bam} --bed $$chunk{chr}:$$chunk{beg}-$$chunk{end} --ref $$self{fasta} --dir $$chunk{dir}";
+    $self->cmd($cmd,verbose=>1);
+
+    # scalpel does not put contig lines in the header, work around this by indexing the file:
+    $self->cmd("bgzip $$chunk{dir}/variants.indel.vcf");
+    $self->cmd("tabix $$chunk{dir}/variants.indel.vcf.gz");
+
+    $self->cmd("touch $outfile");
+}
+

@@ -1,1 +1,285 @@
-/nfs/users/nfs_p/pd3/wtxt/logs/sandbox/vgp/polishing/run-pilon
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{chunk_size}   = 1_000_000;
+    $$self{pilon_cmd}    = "java -Xms8G -Xmx8G -jar ~/lib/pilon/pilon.jar --diploid --changes --vcf --chunksize $$self{chunk_size} --nostrays"; 
+    $$self{limits}       = { runtime=>24*60, memory=>10_000 };
+    $$self{java_memstep} = 4_000;
+    $$self{do_clean}     = 1;
+
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            #  config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            chunk_size => '] .$$self{chunk_size}.  q[',
+            pilon_cmd  => '] .$$self{pilon_cmd}.  q[',
+            fasta      => undef,
+            bam        => undef,
+
+            limits     => { runtime=>24*60, memory=>10_000 },
+            do_clean   => 1,
+    ]."\n";
+
+
+    $$self{usage} .= 
+        "About: Run pilon\n" .
+        "Usage: run-pilon\n" .
+        "Options:\n" .
+        "   -b, --bam <file>        \n" .
+        "   -f, --fasta <file>      \n" .
+        "   -o, --outdir <dir>      \n" .
+        "   -t, --targets <file>    \n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bam' ) { $$self{bam}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-t' or $arg eq '--targets' ) { $$self{targets}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{bam}) ) { $self->throw("Expected the -b option."); }
+    if ( !defined($$self{fasta}) ) { $self->throw("Expected the -f option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
+    my $chunks = $self->read_fai("$$self{fasta}.fai");
+    if ( !@$chunks ) { $self->throw("No chunks to run?\n"); }
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+
+    # chunks:
+    #   - chr
+    #   - beg
+    #   - end
+    #   + dir .. full path
+    for my $chunk (@$chunks)
+    {
+        my $dir = "$$self{outdir}/$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
+        my $cmd = "$$self{pilon_cmd} --genome $$self{fasta} --frags $$self{bam} --targets $$chunk{chr}:$$chunk{beg}-$$chunk{end} --outdir $dir";
+        if ( $cmd=~/--chunksize\s+(\d+)/ && $1 > $$self{chunk_size} )
+        {
+            my $size = $$chunk{end} - $$chunk{beg} + 1;
+            $cmd = $`."--chunksize $size".$';
+        }
+        $self->spawn('run_command',"$dir/done",$cmd);
+        $$chunk{dir} = $dir;
+    }
+    $self->wait;
+
+    $self->spawn('merge',"$$self{outdir}/merged.bcf",$chunks);
+    $self->spawn('merge_fa',"$$self{outdir}/merged.fa",$chunks);
+    $self->wait;
+
+    $self->clean($chunks);
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,$chunks) = @_;
+    if ( !$$self{do_clean} )  { return; }
+    $self->SUPER::clean($$self{outdir});
+    for my $chunk (@$chunks)
+    {
+        $self->cmd("rm -rf $$chunk{dir}");
+    }
+}
+
+sub index_part
+{
+    my ($self,$vcf) = @_;
+    $self->cmd("bcftools index -f $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
+}
+
+sub merge
+{
+    my ($self,$outfile,$chunks) = @_;
+    open(my $fh,'>',"$outfile.list") or $self->throw("$outfile.list: $!");
+    for my $chunk (@$chunks)
+    {
+        print $fh "$$chunk{dir}/pilon.vcf\n";
+    }
+    close($fh) or $self->throw("close failed: $outfile.list");
+    $self->cmd("bcftools concat -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools sort -Ou | bcftools norm -c s -f $$self{fasta} -Ob -o $outfile.tmp");
+
+    # fix header, pilon gives chunk length and this prevents indexing of the vcf
+    $self->cmd(qq[bcftools view -h $outfile.tmp | awk '{if(\$line~/^##contig/) gsub(/,length=.+/,">"); print \$line}'> $outfile.hdr]);
+    $self->cmd("bcftools reheader -h $outfile.hdr $outfile.tmp -o $outfile.part");
+    unlink("$outfile.tmp");
+
+    $self->index_part($outfile);
+}
+
+sub fa_push
+{
+    my ($self,$fa,$line) = @_;
+
+    my $out = '';
+    if ( !defined $line )
+    {
+        $out = $$fa{buf};
+        $$fa{buf} = undef;
+        $$fa{hdr} = undef;
+        return $out."\n";
+    }
+
+    chomp($line);
+    if ( $line=~/^>/ )
+    {
+        $line =~ s/_pilon$//;
+        if ( defined $$fa{hdr} )
+        {
+            if ( $$fa{hdr} ne $line )
+            {
+                my $prn = $self->fa_push($fa);
+                if ( defined $prn ) { $out = $prn; }
+            }
+            else { return undef; }
+        }
+        $$fa{hdr} = $line;
+        $out .= $line."\n";
+        return $out;
+    }
+
+    my $len = 60;
+    $$fa{buf} .= $line;
+    while ( length($$fa{buf}) >= $len )
+    {   
+        $out .= substr($$fa{buf},0,$len,'');
+        $out .= "\n";
+    }
+    return $out;
+}
+
+sub merge_fa
+{
+    my ($self,$outfile,$chunks) = @_;
+    my $fa_buf = {};
+    open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
+    for my $chunk (@$chunks)
+    {
+        open(my $in,'<',"$$chunk{dir}/pilon.fasta") or $self->throw("$$chunk{dir}/pilon.fasta");
+        while (my $line=<$in>)
+        {
+            my $prn = $self->fa_push($fa_buf,$line);
+            if ( $prn ) { print $fh $prn; }
+        }
+        close($in) or $self->throw("close failed: $$chunk{dir}/pilon.fasta");
+    }
+    my $prn = $self->fa_push($fa_buf);
+    if ( $prn ) { print $fh $prn; }
+    close($fh) or $self->throw("close failed: $outfile.part");
+    $self->cmd("samtools faidx $outfile.part");
+    rename("$outfile.part.fai","$outfile.fai") or $self->throw("rename $outfile.part.fai $outfile.fai: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    my %chrs = ();
+    if ( exists($$self{targets}) )
+    {
+        open(my $fh,'<',$$self{targets}) or $self->throw("$$self{targets}: $!");
+        while (my $line=<$fh>)
+        {
+            chomp($line);
+            $line =~ s/^\s*//;
+            $line =~ s/\s*$//;
+            $chrs{$line} = 1;
+        }
+        close($fh) or $self->throw("close failed: $$self{targets}");
+    }
+
+    # Determine the chromosomes and their lengths
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    my @chunks = ();
+    while (my $line=<$fh>)
+    {
+        my ($chr,$end,undef) = split(/\t/,$line);
+        if ( scalar keys %chrs && !exists($chrs{$chr}) ) { next; }
+
+        my $beg = 1;
+        push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
+        if ( !$$self{chunk_size} or $chunks[-1]{end} - $chunks[-1]{beg} + 1 < $$self{chunk_size} ) { next; }
+
+        # chunk the contigs into smaller pieces
+        while ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 > $$self{chunk_size} )
+        {
+            my $beg = $chunks[-1]{beg} + $$self{chunk_size};
+            my $end = $chunks[-1]{end};
+            $chunks[-1]{end} = $beg - 1;
+            push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
+        }
+
+        # if last chunk is too small, make the previous bigger
+        if ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 < 0.3*$$self{chunk_size} )
+        {
+            my $end = $chunks[-1]{end};
+            pop @chunks;
+            $chunks[-1]{end} = $end;
+        }
+    }
+    close($fh);
+
+    if ( !@chunks ) { $self->throw("No sequences read from $fai??"); }
+    return \@chunks;
+}
+
+sub run_command
+{
+    my ($self,$outfile,$cmd) = @_;
+    my %args = (verbose=>1);
+    if ( $cmd=~/^\s*java/i )
+    {
+        $args{java_err_file} = "$outfile.java";
+        $args{memstep} = $$self{java_memstep};
+    }
+    $self->cmd($cmd, %args);
+    $self->cmd("touch $outfile");
+}
+
