@@ -1170,6 +1170,55 @@ sub _mkdir
     return $fname;
 }
 
+sub _java_cmd_prep
+{
+    my ($self,$cmd,%args) = @_;
+
+    if ( !($cmd=~/^\S*java\s+/ ) ) { return $cmd; }
+    if ( !($cmd=~/\s+-Xm[sx](\S+)/) ) { return $cmd; }
+
+    my $xmx = $1;
+    if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1024; }
+    elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+
+    my $mem = int($self->get_limits('memory') * 0.9);
+    if ( $mem <= 0 ) { $mem = 500; }
+    if ( $mem < $xmx ) { $mem = $xmx; }
+
+    $cmd =~ s/-Xms\S+/-Xms${mem}m/;
+    $cmd =~ s/-Xmx\S+/-Xmx${mem}m/;
+
+    if ( -e $args{java_err_file} )
+    {
+        `(cat $args{java_err_file}; echo;) >> $args{java_err_file}.prev`; 
+        unlink($args{java_err_file}); 
+    }
+    return "$cmd >$args{java_err_file} 2>&1";
+}
+sub _java_cmd_err
+{
+    my ($self,$cmd,%args) = @_;
+
+    my $out_of_memory = 0;
+    open(my $fh,'<',$args{java_err_file}) or $self->throw("$args{java_err_file}: $!");
+    while (my $line=<$fh>)
+    {
+        if ( $line=~/java.lang.OutOfMemoryError/ ) { $out_of_memory = 1; last; }
+        if ( $line=~/Could not create the Java virtual machine/ ) { $out_of_memory = 1; last; }
+    }
+    close($fh);
+    if ( !$out_of_memory ) { return; }      # not an out of memory error, exit the standard way
+
+    # out of memory: tell the runner to use more memory next time
+    my $mem = $self->get_limits('memory');
+    if ( exists($args{memstep}) ) { $mem += $args{memstep}; }
+    elsif ( exists($$self{memstep}) ) { $mem += $$self{memstep} }
+    else { $mem += 2000; }
+
+    $self->set_limits(memory=>$mem);
+    $self->throw("Memory limit exceeded, increasing the memory limit for the next run to $mem. The command was:\n$cmd\n");
+}
+
 
 =head2 cmd
 
@@ -1179,6 +1228,8 @@ sub _mkdir
             <hash>
                 Optional arguments: 
                 - exit_on_error     .. if set to 0, don't throw on errors. If not given, exit_on_error=1 is assumed
+                - java_err_file     .. temporary file used for increasing java limits
+                - memstep           .. increase memory by this amount if the java command fails [2000]
                 - require_status    .. throw if exit status is different [0]
                 - verbose           .. print command to STDERR before executing [0]
 
@@ -1187,6 +1238,8 @@ sub _mkdir
 sub cmd
 {
     my ($self,$cmd,%args) = @_;
+
+    if ( $args{java_err_file} ) { $cmd = $self->_java_cmd_prep($cmd,%args); }
 
     if ( $$self{verbose} or $args{verbose} ) { print STDERR $cmd,"\n"; }
 
@@ -1216,6 +1269,8 @@ sub cmd
     my $status = exists($args{require_status}) ? $args{require_status} : 0;
     if ( $status ne $exit_status ) 
     {
+        if ( $args{java_err_file} ) { $self->_java_cmd_err($cmd,%args); }
+        
         my $msg;
         if ( $? & 0xff )
         {
@@ -1237,7 +1292,7 @@ sub cmd
     About : Similar to cmd, this subroutine executes a command via bash in the
             -o pipefail mode. However, unlike cmd, it returns both standard and
             error output and captures error messages from multiple piped commands.
-            This requires IPC::Run3, which is not installed on installed systems.
+            This requires IPC::Run3, which is often not installed by default.
     Args  : <string>
                 The command to be executed
             <hash>
