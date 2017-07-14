@@ -1170,16 +1170,35 @@ sub _mkdir
     return $fname;
 }
 
+=head2 get_java_limits
+
+    About : Parse java command and return requested memory, in MB
+    Args  : <string>
+                The java command to be executed, with -Xmx or -Xms string
+=cut
+
+sub get_java_limits
+{
+    my ($self,$cmd) = @_;
+
+    if ( !($cmd =~ /-Xmx(\S+)/) && !($cmd =~ /-Xms(\S+)/) ) { return undef; }
+
+    my $xmx = $1;
+    if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1024; }
+    elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+
+    return $xmx;
+}
+
+
 sub _java_cmd_prep
 {
     my ($self,$cmd,%args) = @_;
 
     if ( !($cmd=~/^\S*java\s+/ ) ) { return $cmd; }
-    if ( !($cmd=~/\s+-Xm[sx](\S+)/) ) { return $cmd; }
 
-    my $xmx = $1;
-    if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1024; }
-    elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+    my $xmx = $self->get_java_limits($cmd);
+    if ( !defined $xmx ) { return $cmd; }
 
     my $mem = int($self->get_limits('memory') * 0.9);
     if ( $mem <= 0 ) { $mem = 500; }

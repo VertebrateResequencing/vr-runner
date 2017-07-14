@@ -134,21 +134,6 @@ sub parse_args
     if ( exists($$self{bam_tag}) && !$$self{bwa_mem} ) { $self->throw("Need bwa_mem with bam_tag\n"); }
 }
 
-sub set_java_memory
-{
-    my ($self,$cmd) = @_;
-
-    if ( !($cmd =~ /-Xmx(\S+)/) && !($cmd =~ /-Xms(\S+)/) ) { return; }
-
-    my $xmx = $1;
-    if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1024; }
-    elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
-
-    $xmx *= 1.15;
-
-    $self->set_limits(memory=>$xmx);
-}
-
 sub main
 {
     my ($self) = @_;
@@ -308,7 +293,9 @@ sub main
 
     if ( $$self{rmdup} )
     {
-        $self->set_java_memory($$self{picard});
+        my $mem = $self->get_java_limits($$self{picard});
+        if ( defined $mem ) { $self->set_limits(memory=>$mem*1.15); }
+
         $self->spawn('rmdup',"$$self{outdir}/merged.rmdup.bam","$$self{outdir}/merged.bam");
         $self->wait;
     }
