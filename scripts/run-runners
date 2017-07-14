@@ -499,7 +499,7 @@ sub update_html_report
                 elsif ( !-e "$abs_dir/$$project{name}.$step" )  { $class='status-todo'; }
                 elsif ( $prev_done )
                 {
-                    $url_conf = "$rel_dir/$$project{name}.$step.conf";
+                    if ( -e "$abs_dir/$$project{name}.$step.conf" ) { $url_conf = "$rel_dir/$$project{name}.$step.conf"; }
                     if ( $is_error )
                     {
                         $class = 'status-error';
@@ -691,7 +691,6 @@ sub clean_project
             cmd($opts,"mv $src $dst");
         }
     }
-
     cmd($opts,"mkdir -p $$opts{dropbox_out}/$$project{run_id}/tmp-data");
     cmd($opts,"mv $$opts{dropbox_tmp}/$$project{run_id} $$opts{dropbox_out}/$$project{run_id}/tmp-data");
 }
