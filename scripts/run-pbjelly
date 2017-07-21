@@ -1,0 +1,307 @@
+#!/usr/bin/env perl
+#
+# Author: shane.mccarthy@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+use File::Spec;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{do_clean} = 1;
+    $$self{verbose} = 1;
+    $$self{limits} = { memory => 8000, runtime=>24*60 };
+    $$self{jelly} = '/software/vertres/bin-external/PBSuite_15.8.24';
+    $$self{samtools} = '/software/vertres/bin-external/htslib-1.5/bin/samtools';
+    $$self{gzip} = '/software/vertres/bin-external/pigz';
+    $$self{blasr_options} = '-minMatch 8 -sdpTupleSize 8 -minPctIdentity 75 -bestn 1 -nCandidates 10 -maxScore -500 -nproc 16 -noSplitSubreads';
+    $$self{assembly_options} = '--nproc 4';
+    $$self{config_version} = '1499677466';
+    $$self{_sampleconf} = q[
+# For sanity checking that your config file is not obsolete.
+# Update the version key in your config file to remove warnings.
+#
+#   1499677466 .. Initial pipeline
+#
+version  => '] . $$self{config_version} . q[',
+
+# file containing the input *.subreads.bam or *.bax.h5 files - one file per line
+fofn => '/path/to/list/of/input/files',
+
+# directory for output files - will be created if it doesn't exist
+outdir => '/path/to/output/directory',
+
+# path to the scaffold fasta to be gap-filled (PBJelly requires that the name end in ".fasta")
+scaffold => '/path/to/scaffold/fasta',
+
+# This pipeline currently designed for the version 15.8.24 of PBJelly
+# available at https://sourceforge.net/projects/pb-jelly/files/PBSuite_15.8.24.tgz/download
+# It requires an old version of blasr (1.3.1.127046) that can be found
+# https://sourceforge.net/projects/wgs-assembler/files/wgs-assembler/wgs-8.3/
+# By default will looking in the /bin dir under your jelly install (] . "$$self{jelly}/bin/blasr" . q[)
+# as this directory will be prepended to your path by the jelly setup.sh script.
+
+# There is a version of PBJelly on the sourceforge SVN develoment branch that
+# that will supposedly support newer versions of blasr, but it is apparently
+# not ready for use yet.
+# There is also a forked version on github that may work though:
+# https://github.com/dbrowneup/PBSuite
+# and a successor that doesn't look like it is ready yet:
+# https://github.com/dbrowneup/Jelly2
+
+# path to you PBSuite installation. A 'setup.sh' script is expected
+# in this directory to set environment variables appropriately
+jelly => '] . $$self{jelly} . q[',
+
+# program options
+blasr_options => '] . $$self{blasr_options} . q[',
+assembly_options => '] . $$self{assembly_options} . q[',
+
+# samtools version that supports the 'fastq' option
+samtools  => '] . $$self{samtools} . q[',
+] . "\n";
+
+    $$self{usage} .=
+        "Usage: run-pbjelly\n" .
+        "Options:\n" .
+        "   -f, --fofn          fofn listing input *.subreads.bam or *.bax.h5 files\n" .
+        "   -o, --outdir        path to output directory\n" .
+        "   -s, --scaffold      path to scaffold fasta\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f' or $arg eq '--fofn' ) { $$self{fofn}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--scaffold' ) { $$self{scaffold}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{scaffold}) ) { $self->throw("Expected --scaffold option."); }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected --outdir option."); }
+    $$self{outdir} = File::Spec->rel2abs($$self{outdir});
+    if ( !exists($$self{fofn}) ) { $self->throw("Expected --fofn option."); }
+    if ( !exists($$self{jelly}) ) { $self->throw("Expected --jelly option - set in the config file"); }
+    if ( !(-e "$$self{jelly}/setup.sh") ) { $self->throw("no setup.sh script to be located in --jelly directory [$$self{jelly}/setup.sh]"); }
+    if ( !exists($$self{blasr}) )
+    {
+        $$self{blasr} = (-e "$$self{jelly}/bin/blasr") ? "$$self{jelly}/bin/blasr" : 'blasr';
+    }
+    if ( !exists($$self{blasr_limits}) )
+    {
+        $$self{blasr_limits} = { memory => 64000, runtime => 2*24*60 };
+    }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    # uncompress or make copy of the assembly fasta
+    my ($basename) = $$self{scaffold} =~ m/([^\/]+)(\.gz)?$/;
+    $self->spawn('prepare_fasta',"$$self{outdir}/scaffold/$basename",$$self{scaffold});
+    $self->wait;
+    $$self{scaffold} = "$$self{outdir}/scaffold/$basename";
+
+    # setup the scaffold fasta - index and find gaps
+    my $gapinfo = $$self{scaffold};
+    $gapinfo =~ s/fasta$/gapInfo.bed/;
+    $$self{gapinfo} = $gapinfo;
+    $self->set_limits(%{$$self{limits}}, cpus => 4);
+    $self->spawn('setup', $$self{gapinfo});
+
+    # convert bam to fastq - this old version of blasr cannot read bam as input
+    my $bams = $self->read_list("$$self{fofn}");
+    my @basenames;
+    foreach my $bam (@$bams)
+    {
+        my ($base) = $bam =~ m/([^\/]+)\.(cr|b)am$/;
+        push(@basenames, $base);
+        $self->spawn('bam2fq', "$$self{outdir}/fastq/${base}.fastq", $bam);
+    }
+    $self->wait;
+
+    # map with blasr
+    $self->protocol("$$self{outdir}/protocol.xml", \@basenames) unless (-s "$$self{outdir}/protocol.xml");
+    my $cpus = $self->num_cpus($$self{blasr_options});
+    $self->set_limits(%{$$self{limits}}, %{$$self{blasr_limits}}, $cpus ? (cpus => $cpus) : ());
+    foreach my $base (@basenames)
+    {
+        $self->spawn('mapping', "$$self{outdir}/mapping/${base}.fastq.m4", "$$self{outdir}/fastq/${base}.fastq");
+    }
+    $self->wait;
+
+    # find supporting reads
+    $self->set_limits(memory=>8000,runtime=>undef,cpus=>undef);
+    foreach my $base (@basenames)
+    {
+        $self->spawn('support', "$$self{outdir}/support/${base}.fastq.gml", "$$self{outdir}/mapping/${base}.fastq.m4");
+    }
+    $self->wait;
+
+    # extract the supporting reads
+    $self->set_limits(memory=>48000);
+    $self->spawn('extraction', "$$self{outdir}/asmdirs.txt");
+    $self->wait;
+
+    # assemble reads across gaps
+    my $assemblies = $self->read_list("$$self{outdir}/asmdirs.txt");
+    $cpus = $self->num_cpus($$self{assembly_options});
+    $self->set_limits(%{$$self{limits}}, $cpus ? (cpus => $cpus) : ());
+    foreach my $asm (@$assemblies)
+    {
+        $self->spawn('assembly', "$asm/.done", $asm);
+    }
+    $self->wait;
+
+    # place assembled sequence and make gap-filled output
+    $self->set_limits(memory=>4000);
+    $self->spawn('output', "$$self{outdir}/jelly.out.fasta.gz");
+    $self->wait;
+
+    $self->all_done;
+}
+
+sub prepare_fasta
+{
+    my ($self,$outfile,$fasta) = @_;
+    if ($fasta =~ /\.gz/)
+    {
+        $self->cmd(qq[$$self{gzip} -dc $fasta > $outfile.part]);
+    }
+    else
+    {
+        $self->cmd(qq[cp $fasta $outfile.part]);
+    }
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub protocol
+{
+    my ($self,$outfile,$basenames) = @_;
+    open(my $fh, ">$outfile.part") or $self->throw("Could not open $outfile.part: $!");
+    print $fh qq[<jellyProtocol>\n];
+    print $fh qq[    <reference>$$self{scaffold}</reference>\n];
+    print $fh qq[    <outputDir>$$self{outdir}</outputDir>\n];
+    print $fh qq[    <blasr>$$self{blasr_options}</blasr>\n];
+    print $fh qq[    <input baseDir="$$self{outdir}/fastq/">\n];
+    foreach my $base (@$basenames)
+    {
+        print $fh qq[        <job>$base.fastq</job>\n];
+    }
+    print $fh qq[    </input>\n];
+    print $fh qq[</jellyProtocol>\n];
+    close($fh) or $self->throw("Could not close $outfile.part: $!");
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub setup
+{
+    my ($self,$outfile) = @_;
+    $self->cmd(qq[source $$self{jelly}/setup.sh && Setup.py $$self{scaffold} -g $outfile.part -i]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bam2fq
+{
+    my ($self,$outfile,$bam) = @_;
+    $self->cmd(qq[$$self{samtools} fastq -\@4 $bam > $outfile.part]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub mapping
+{
+    my ($self,$outfile,$fq) = @_;
+    $self->cmd(qq[source $$self{jelly}/setup.sh && $$self{blasr} $fq $$self{scaffold} -sa $$self{scaffold}.sa -m 4 -out $outfile.part $$self{blasr_options}]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub support
+{
+    my ($self,$outfile,$mapfile) = @_;
+    $self->cmd(qq[source $$self{jelly}/setup.sh && Support.py $mapfile $$self{gapinfo} $outfile.part]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub extraction
+{
+    my ($self,$outfile,$mapfile) = @_;
+    $self->cmd(qq[source $$self{jelly}/setup.sh && Extraction.py $$self{outdir}/protocol.xml]);
+    open (my $fh, ">$outfile.part") or $self->throw("Could not open $outfile.part: $!");
+    opendir(my $dh, "$$self{outdir}/assembly") or $self->throw("Can't open $$self{outdir}/assembly: $!");
+    while (readdir $dh) {
+        next unless (/ref[\d\.\_e]+$/);
+        print $fh "$$self{outdir}/assembly/$_\n";
+    }
+    closedir($dh) or $self->throw("Could not close $$self{outdir}/assembly: $!");
+    close($fh) or $self->throw("Could not close $outfile.part: $!");
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub assembly
+{
+    my ($self,$outfile,$asm_dir) = @_;
+    my $opts = $$self{assembly_options};
+    $opts .= " -p 100" if ($asm_dir =~ m/ref[\d\.e]+_ref[\d\.e]+$/);
+    $self->cmd(qq[source $$self{jelly}/setup.sh && Assembly.py $asm_dir $opts]);
+    $self->cmd(qq[touch $outfile]);
+}
+
+sub output
+{
+    my ($self,$outfile) = @_;
+    my $prefix = $outfile;
+    $prefix =~ s/\.fasta(\.gz)$//;
+    $self->cmd(qq[source $$self{jelly}/setup.sh && Collection.py $$self{outdir}/protocol.xml]);
+    $self->cmd(qq[source $$self{jelly}/setup.sh && summarizeAssembly.py $prefix.fasta > $prefix.stats]);
+    $self->cmd(qq[cat $prefix.qual | $$self{gzip} -c > $prefix.qual.gz]);
+    $self->cmd(qq[cat $prefix.fasta | $$self{gzip} -c > $outfile.part]);
+    $self->cmd(qq[rm $prefix.qual $prefix.fasta]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub num_cpus
+{
+    my ($self,$opts) = @_;
+    my ($cpus) = $opts =~ m/-nproc\s*(\d+)/;
+    return $cpus;
+}
+
+sub read_list
+{
+    my ($self, $file) = @_;
+    my @list;
+    open(my $fh, "<$file") or $self->throw("Could not open file $file: $!");
+    while (<$fh>)
+    {
+        chomp;
+        next if (/^#/);
+        push(@list, $_);
+    }
+    close($fh) or $self->throw("Could not close $file: $!");
+    return \@list;
+}
