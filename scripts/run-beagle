@@ -188,6 +188,7 @@ sub main
         $self->spawn('beagle',"$outdir/$$chunk[0]/$$chunk[1]-$$chunk[2].done","$outdir/$$chunk[0]",$chunk);
     }
     $self->wait;
+    if ( $cpus ) { $self->set_limits(cpus=>undef); }
 
     # Convert to VCFs and concat
     if ( $$self{merge_chroms} ) 
