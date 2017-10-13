@@ -113,9 +113,10 @@ sub main
 
     # uncompress or make copy of the assembly fasta
     my ($basename) = $$self{assembly} =~ m/([^\/]+)(\.gz)?$/;
-    $self->spawn('prepare_fasta',"$$self{outdir}/assembly/$basename",$$self{assembly});
+    $basename =~ s/\.fa(sta)?(\.gz)?$//;
+    $self->spawn('prepare_fasta',"$$self{outdir}/assembly/$basename.fasta",$$self{assembly});
     $self->wait;
-    $$self{assembly} = "$$self{outdir}/assembly/$basename";
+    $$self{assembly} = "$$self{outdir}/assembly/$basename.fasta";
 
     # index the assembly fasta - should make blasr faster
     $self->set_limits(%{$$self{limits}}, cpus => 4);
