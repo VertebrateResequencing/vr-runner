@@ -38,20 +38,46 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
     sub main
     {
         my ($self) = @_;
-        for my $file (qw(1 2 3))
-        {
-            # When run in parallel mode (default), the jobs will be submitted
-            #   to farm by the spawn call. The arguments are: 
-            #   - method    .. subroutine to be called (defined by the user)
-            #   - done_file .. the file to be created by the method
-            #   - params    .. arbitrary number of arguments which will be passsed to the method
 
-            my $method    = "touch";
-            my $done_file = "$ENV{HOME}/Hello.$file";
-            my @params    = ();
-            $self->spawn($method,$done_file,@params);
+        # This simple pipeline has two steps. In the first step, two groups
+        # of empty files are created - Hello.[123] and Hello.[abc]. This is
+        # not really useful for anything else other than demonstrate how to
+        # run jobs in parallel and how to allow groups of jobs proceed 
+        # independently.
+        # Jobs in one group take longer to run, they contain a 60 seconds sleep
+        # interval. Both groups are run independently and synchronized at the end.
+
+        my $groups = {};
+        my $keys   = { alpha=>[qw(a b c)], num=>[qw(1 2 3)] };
+        my $sleep  = 1;
+        for my $group (keys %$keys)
+        {
+            for my $suffix (@{$$keys{$group}})
+            {
+                my $method    = "touch";                        # Create an empty file
+                my $done_file = "$ENV{HOME}/Hello.$suffix";
+                my %params    = ( sleep=>$sleep );
+                $self->spawn($method,$done_file,%params);       # This schedules the jobs
+
+                push @{$$groups{$group}}, $done_file;           # This defines the group
+            }
+            $sleep += 60;       # Let the job from the numeric group run somewhat longer
         }
-        # Checkpoint, wait until all the above files are finished
+        my $done = $self->wait($groups);
+
+        # In the second step, the pipeline creates independently a file for each group.
+        # Note that this step can be run before the previous step finishes.
+        # It is possible to either iterate over the groups as in the loop below
+        # or test the status explicitly by calling
+        #   $self->group_done($done,$grp)
+        #   $self->group_done($done,[$grp1,$grp2,$grp3])
+
+        for my $group (keys %$done)
+        {
+            $self->spawn('group',"$ENV{HOME}/Hello.$group",$$done{$group});
+        }
+
+        # If no arguments are given, the code waits until all jobs are completed
         $self->wait;
 
         # Clean temporary files
@@ -61,14 +87,30 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
         $self->all_done;
     }
 
+    # Create an empty file    
     sub touch
     {
-        my ($self,$file) = @_;
-        print STDERR "touch $file\n";
-        # Pretend that it takes some time to complete this task
-        sleep(10);
-        `touch $file`;
+        my ($self,$output_file,%params) = @_;
+   
+        # Pretend there is some computation lasting a few seconds
+        sleep($params{sleep});
+
+        `touch $output_file`;
     }
+
+    # Write time stamps (mtime) into a file
+    sub group
+    {   
+        my ($self,$output_file,$files) = @_;
+        open(my $fh,'>',"$output_file.part") or $self->throw("$output_file.part: $!");
+        for my $file (@$files) 
+        {   
+            my $mtime = (stat($file))[9];
+            print $fh "$mtime\t$file\n";
+        }
+        close($fh) or $self->throw("close failed: $output_file.part");
+        rename("$output_file.part",$output_file) or $self->throw("rename $output_file.part $output_file: $!");
+    }   
 
     sub new
     {
@@ -684,7 +726,7 @@ sub _mark_as_finished
 
 sub _get_unfinished_jobs
 {
-    my ($self) = @_;
+    my ($self,$file2grp) = @_;
 
     $$self{_jobs_db_unfinished} = 0;
 
@@ -698,6 +740,8 @@ sub _get_unfinished_jobs
     my %wfiles = ();
     my $nprn_done = 0;
     my $nprn_pend = 0;
+    my $has_grp = scalar keys %$file2grp;
+    my $fgroups = {};
     for my $call (keys %calls)
     {
         my @list = @{$calls{$call}};
@@ -725,6 +769,12 @@ sub _get_unfinished_jobs
             {
                 if ( $nprn_done < 2 ) { $self->debugln("\to  $$job{done_file} .. " . ($ret ne '1' ? 'cached' : 'done')); $nprn_done++; }
                 elsif ( $nprn_done < 3 ) { $self->debugln("\to  ...etc..."); $nprn_done++; }
+                if ( $has_grp )
+                {
+                    my $done_file = $$job{done_file};
+                    my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
+                    push @{$$fgroups{$grp}}, $done_file;
+                }
                 splice(@{$calls{$call}}, $i, 1);
                 $i--;
             }
@@ -746,7 +796,7 @@ sub _get_unfinished_jobs
         if ( !@{$calls{$call}} ) { delete($calls{$call}); }
     }
     $self->_mark_as_finished();
-    return \%wfiles;
+    return (\%wfiles,$fgroups);
 }
 
 sub _init_scheduler
@@ -772,7 +822,12 @@ sub _init_scheduler
             $self->spawn("method",$done_file2,@params2);
             $self->wait();
     Args  : <none>
-                Without arguments, waits for files registered by previous spawn calls.
+                Without arguments, waits for all files registered by previous spawn calls.
+            <hashref>
+                Group of jobs to be run together. If at least one group has finished, the
+                function runs in a non-blocking mode and returns the finished groups on output.
+                Otherwise the function runs in a blocking mode and will not return until
+                all jobs have finished.
             <array>
                 Extra files to wait for, in addition to those registered by spawn.
 
@@ -780,14 +835,34 @@ sub _init_scheduler
 
 sub wait
 {
-    my ($self,@files) = @_;
+    my ($self,@args) = @_;
+
+    my $groups   = {};
+    my $file2grp = {};
+    my @extra_files = ();
+    if ( scalar @args )
+    {
+        if ( ref($args[0]) eq 'HASH' )
+        {
+            $groups = $args[0];
+            for my $grp (keys %{$args[0]})
+            {
+                for my $file (@{$args[0]{$grp}}) 
+                { 
+                    $file =~ s{/+}{/}g;
+                    $$file2grp{$file} = $grp; 
+                }
+            }
+        }
+        else { @extra_files = @args; }
+    }
 
     # Initialize job scheduler (LSF, LSFCR, ...). This needs to be done here in
     # order for $js->clean_jobs() to work when $self->_get_unfinished_jobs() is called
     $self->_init_scheduler;
 
     # First check the files passed to wait() explicitly
-    for my $file (@files)
+    for my $file (@extra_files)
     {
         if ( ! $self->is_finished($file) ) 
         { 
@@ -799,13 +874,13 @@ sub wait
 
     my (@caller) = caller(0);
     $self->debugln("Checking the status of ", scalar @{$$self{_checkpoints}}," job(s) .. $caller[1]:$caller[2]");
-    my $jobs = $self->_get_unfinished_jobs();
+    my ($jobs,$fgroups) = $self->_get_unfinished_jobs($file2grp);
 
-    $$self{_checkpoints} = [];
+    if ( !scalar keys %$file2grp ) { $$self{_checkpoints} = []; }
     if ( !scalar keys %$jobs ) 
     { 
         $self->debugln("\t-> done");
-        return; 
+        return $fgroups; 
     }
     my $n = 0;
     for my $wfile (keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
@@ -821,14 +896,20 @@ sub wait
             my $rfile = $self->freeze($wfile);
             for my $id (sort {$a<=>$b} keys %{$$jobs{$wfile}})
             {
-                $self->_mkdir($$jobs{$wfile}{$id}{done_file});
+                my $done_file = $$jobs{$wfile}{$id}{done_file};
+                $self->_mkdir($done_file);
                 my $cmd = qq[$0 +run $rfile $id];
                 $self->debugln("$$jobs{$wfile}{$id}{call}:\t$cmd");
                 system($cmd);
                 if ( $? ) { $self->throw("The command exited with a non-zero status $?\n"); }
+                if ( scalar keys %$file2grp )
+                {
+                    my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
+                    push @{$$fgroups{$grp}}, $done_file;
+                }
             }
         }
-        return;
+        return $fgroups;
     }
 
     # Spawn to farm
@@ -858,6 +939,7 @@ sub wait
             my $must_run = 1;
             my $done_file = $$jobs{$wfile}{$ids[$i]}{done_file};
             my $task = $$tasks[$i];
+            $done_file =~ s{/+}{/}g;
 
             if ( !defined $task )
             {
@@ -983,6 +1065,12 @@ sub wait
         }
     }
     if ( $$self{_kill_jobs} ) { $self->all_done; }
+    for my $grp (keys %$fgroups )
+    {
+        if ( exists($$groups{$grp}) && scalar @{$$groups{$grp}} == scalar @{$$fgroups{$grp}} ) { next; }
+        delete($$fgroups{$grp});
+    }
+    if ( scalar keys %$fgroups ) { return $fgroups; }
     if ( $is_running ) { exit; }
 }
 
@@ -1042,6 +1130,34 @@ sub clean
         $self->debugln($cmd);
         system($cmd);
     }
+}
+
+=head2 group_done
+
+    About : Check if the group returned by wait() has finished
+    Usage : $self->group_done($done,'done_file');
+    Args  : <string>
+            <array>
+            <arrayref>
+                One or more groups to wait for
+                
+=cut
+
+sub group_done
+{
+    my ($self,$done,@groups) = @_;
+    for my $grp (@groups)
+    {
+        if ( ref($grp) eq 'ARRAY' )
+        {
+            for my $name (@$grp)
+            {
+                if ( !exists($$done{$name}) ) { return 0; }
+            }
+        }
+        elsif ( !exists($$done{$grp}) ) { return 0; }
+    }
+    return 1;
 }
 
 =head2 is_finished
