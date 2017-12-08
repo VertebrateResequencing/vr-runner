@@ -108,6 +108,7 @@ sub init_jobs
 sub _parse_mem
 {
     my ($self,$mem) = @_;
+    if ( !defined $mem or $mem eq '' ) { return 0; }
     if ( $mem=~/^(\d+\.?\d*)(\D)/ )
     {
         if ( lc($2) eq 'm' ) { $mem = $1; }
@@ -150,8 +151,7 @@ sub _parse_elapsed
 sub _sacct_status
 {
     my ($self,$job_name,$id,$job_id) = @_;      # runner id (array index) and slurm id
-    my $cmd = qq[sacct -n -j $job_id.batch -o state,maxvmsize,elapsed];
-    #print STDERR "$cmd\n";
+    my $cmd = qq[sacct -n -j $job_id.batch -P -o state,maxvmsize,elapsed];
     my @out = ();
     for (my $i=3; $i<15; $i++)
     {
@@ -170,15 +170,22 @@ sub _sacct_status
         print STDERR "sacct returned no results, giving up\n";
         return (undef,undef);
     }
-    if ( scalar @out > 1 ) { $self->throw("Too many lines from `$cmd`:\n".join('',@out)); }
-    my $line = $out[0];
-    chomp($line);
-    $line =~ s/^\s*//;
-    $line =~ s/\s*$//;
-    my ($state,$maxmem,$elapsed) = split(/\s+/,$line);
-    $maxmem  = $self->_parse_mem($maxmem);
-    $elapsed = $self->_parse_elapsed($elapsed);
+    my ($state,$maxmem,$elapsed);
+    for my $line (@out)
+    {
+        chomp($line);
+        $line =~ s/^\s*//;
+        $line =~ s/\s*$//;
+        my ($_state,$_maxmem,$_elapsed) = split(/\|/,$line);
+        $_maxmem  = $self->_parse_mem($_maxmem);
+        $_elapsed = $self->_parse_elapsed($_elapsed);
+        if ( !defined $maxmem or $maxmem < $_maxmem ) { $maxmem = $_maxmem; }
+        if ( !defined $elapsed or $elapsed < $_elapsed ) { $elapsed = $_elapsed; }
+        $$state{$_state} = 1;
+    }
     my $memlimit = $maxmem;
+    if ( scalar keys %$state != 1 ) { $self->throw("SLURM todo: $cmd .. ".join('',@out)."\n"); }
+    $state = (keys %$state)[0];
 
     if ( $state eq 'FAILED' )
     {
@@ -284,7 +291,7 @@ sub _update_job_status
     }
 
     # Update status
-    if ( $$self{slurm_status}{$status} eq $$self{Running} ) { $self->throw("This should not happen: $status\n"); }
+    if ( $$self{slurm_status}{$status} eq $$self{Running} ) { $dirty = 0; }
     elsif ( $$self{slurm_status}{$status} eq $$self{Done} )
     {
         $$jobs{Done}{$id} = $$jobs{Running}{$id};
