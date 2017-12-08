@@ -488,7 +488,7 @@ sub run_jobs
         # elsif ( $$self{default_limits}{memory_per_node} ) { $mem_per_node = '--mem='.int($$self{defaults_limits}{memory_per_node}); }
 
         if ( $runtime < $$self{limits}{runtime} ) { $runtime = $$self{limits}{runtime}; }
-        if ( $runtime < $$self{defaults_limits}{runtime} ) { $runtime = $$self{default_limits}{runtime}; }
+        if ( $runtime < $$self{default_limits}{runtime} ) { $runtime = $$self{default_limits}{runtime}; }
         $runtime = "--time=$runtime";
 
         my $bsub_cmd = qq[sbatch --parsable $runtime $memory --array='$bsub_ids' -e $job_name.\%a.e -o $job_name.\%a.o $cmd_file];

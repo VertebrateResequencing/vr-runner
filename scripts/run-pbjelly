@@ -123,9 +123,10 @@ sub main
 
     # uncompress or make copy of the assembly fasta
     my ($basename) = $$self{scaffold} =~ m/([^\/]+)(\.gz)?$/;
-    $self->spawn('prepare_fasta',"$$self{outdir}/scaffold/$basename",$$self{scaffold});
+    $basename =~ s/\.fa(sta)?(\.gz)?$//;
+    $self->spawn('prepare_fasta',"$$self{outdir}/scaffold/$basename.fasta",$$self{scaffold});
     $self->wait;
-    $$self{scaffold} = "$$self{outdir}/scaffold/$basename";
+    $$self{scaffold} = "$$self{outdir}/scaffold/$basename.fasta";
 
     # setup the scaffold fasta - index and find gaps
     my $gapinfo = $$self{scaffold};
