@@ -458,6 +458,13 @@ sub set_limits
     $$self{_farm_options} = { %{$$self{_farm_options}}, %args };
     if ( exists($$self{_revived_file}) )
     {
+        # This is to allow user modules to request resources directly. For example,
+        # some programs increase the requirements gradually and it can take a long
+        # time before they fail. The code can then calculate the requirements, fail
+        # immediately and request more memory for the next run. Similarly, java commands
+        # fail without notifying the job scheduler, the user commands must notify
+        # about the requirements, see also cmd(), _java_cmd_prep() and _java_cmd_err().
+
         my $limits_fname = "$$self{_revived_file}.$$self{_revived_job}.limits";
         open(my $fh,'>',$limits_fname) or $self->throw("$limits_fname: $!");
         print $fh Dumper($$self{_farm_options});
@@ -465,7 +472,9 @@ sub set_limits
     }
 }
 
-# When revived, the user module can indirectly request increase of system limits in the next run, see set_limits
+# When revived, the user module can indirectly request increase of system
+# limits in the next run, see set_limits. This function is called just before
+# a job is submitted onto the farm.
 sub _update_limits
 {
     my ($self,$wfile,$id) = @_;
@@ -480,19 +489,35 @@ sub _update_limits
 
     About : increase limits if lower than requested
     Usage : $self->inc_limits(memory=>10_000);
-    Args  : See set_limits
+            $self->inc_limits($dst, memory=>10_000);
+    Args  : See set_limits for details. Note that if the first argument is
+            a hashref, this will be updated, otherwise system-wide limits 
+            are set.
                 
 =cut
 
 sub inc_limits
 {
-    my ($self,%args) = @_;
+    my ($self,@params) = @_;
+    if ( !scalar @params ) { return; }
+    my $dst  = undef;
+    my %args = ();
+    if ( ref($params[0]) eq 'HASH' ) 
+    { 
+        $dst  = shift(@params);
+        %args = @params;
+    }
+    else
+    {
+        $dst  = $$self{_farm_options};
+        %args = @params;
+    }
     for my $key (keys %args)
     {
-        if ( !exists($$self{_farm_options}{$key}) or !defined($$self{_farm_options}{$key}) or $$self{_farm_options}{$key}<$args{$key} ) 
+        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
         { 
-            $self->debugln("increasing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
-            $$self{_farm_options}{$key} = $args{$key};
+            $self->debugln("changing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
+            $$dst{$key} = $args{$key};
         }
     }
 }
@@ -587,6 +612,7 @@ sub spawn
         done_file => $args[0],
         call      => $call,
         args      => \@args,
+        limits    => { %{$$self{_farm_options}} },
     };
     push @{$$self{_checkpoints}}, $job;
 }
@@ -870,7 +896,7 @@ sub wait
             exit; 
         }
     }
-    if ( !exists($$self{_checkpoints}) or !scalar @{$$self{_checkpoints}} ) { return; }
+    if ( !exists($$self{_checkpoints}) or !scalar @{$$self{_checkpoints}} ) { return {}; }
 
     my (@caller) = caller(0);
     $self->debugln("Checking the status of ", scalar @{$$self{_checkpoints}}," job(s) .. $caller[1]:$caller[2]");
@@ -937,7 +963,8 @@ sub wait
         for (my $i=0; $i<@$tasks; $i++)
         {
             my $must_run = 1;
-            my $done_file = $$jobs{$wfile}{$ids[$i]}{done_file};
+            my $job_limits = $$jobs{$wfile}{$ids[$i]}{limits};
+            my $done_file  = $$jobs{$wfile}{$ids[$i]}{done_file};
             my $task = $$tasks[$i];
             $done_file =~ s{/+}{/}g;
 
@@ -1004,13 +1031,14 @@ sub wait
                 if ( exists($limits{MEMLIMIT}) )
                 { 
                     my $mem = $limits{memory}*1.3 > $limits{memory}+1_000 ? $limits{memory}*1.3 : $limits{memory}+1_000;
-                    $self->inc_limits(memory=>$mem); 
+                    $self->inc_limits(\%limits, memory=>$mem);
                 }
                 if ( exists($limits{RUNLIMIT}) )
                 { 
                     my $time = $limits{runtime}*1.5;
-                    $self->inc_limits(runtime=>$time); 
+                    $self->inc_limits(\%limits, runtime=>$time);
                 }
+                $self->inc_limits($job_limits, %limits);
             }
 
             if ( $must_run )
@@ -1039,7 +1067,7 @@ sub wait
         # Update limits as requested by the user module, as opposed to job scheduler
         for my $id (@ids)
         {
-            $self->_update_limits($wfile, $id);
+            $self->_update_limits($$jobs{$wfile}{$id}{limits}, $wfile, $id);
         }
 
         $$self{_store} = $$jobs{$wfile};
@@ -1047,21 +1075,22 @@ sub wait
         my $cmd = qq[$0 +run $rfile {JOB_INDEX}];
         $self->debugln("$wfile:\t$cmd");
 
-        for my $id (@ids)
+        # It is possible to run groups separately to allow for different limits
+        my $clusters = $self->_cluster_jobs($$jobs{$wfile}, \@ids, $file2grp);
+        for my $cluster (@$clusters)
         {
-            $self->_mkdir($$jobs{$wfile}{$id}{done_file});
-        }
-
-        my $ok;
-        eval 
-        {
-            $js->set_limits(%{$$self{_farm_options}});
-            $js->run_jobs($prefix,$cmd,\@ids);
-            $ok = 1;
-        };
-        if ( !$ok )
-        {
-            $self->throw($@);
+            for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
+            my $ok;
+            eval 
+            {
+                $js->set_limits(%{$$cluster{limits}});
+                $js->run_jobs($prefix,$cmd,$$cluster{ids});
+                $ok = 1;
+            };
+            if ( !$ok )
+            {
+                $self->throw($@);
+            }
         }
     }
     if ( $$self{_kill_jobs} ) { $self->all_done; }
@@ -1072,6 +1101,29 @@ sub wait
     }
     if ( scalar keys %$fgroups ) { return $fgroups; }
     if ( $is_running ) { exit; }
+    return {};
+}
+
+sub _cluster_jobs
+{
+    my ($self,$jobs,$ids,$file2grp) = @_;
+    my $clusters = {};
+    for my $id (@$ids)
+    {
+        my $done_file = $$jobs{$id}{done_file};
+        my $limits    = $$jobs{$id}{limits};
+        my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
+        if ( !exists($$clusters{$grp}) ) { $$clusters{$grp} = { limits=>{} }; }
+        my $cluster = $$clusters{$grp};
+        $self->inc_limits($$cluster{limits}, %$limits);
+        push @{$$cluster{ids}}, $id;
+
+        my $dir = $done_file;
+        $dir =~ s{[^/]+$}{};
+        if ( $dir eq '' ) { $dir = './'; }
+        $$cluster{dirs}{$dir} = 1;
+    }
+    return [ values %$clusters ];
 }
 
 

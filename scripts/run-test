@@ -36,12 +36,16 @@ sub main
     # for anything really, just demonstrates the parallelization capabilities.
     # Some of the jobs will take longer to run, still the code will be executed
     # in a synchronized way.
+    # The code also shows how to set memory requirements for each group of jobs
+    # separately.
 
     my $groups = {};
     my $keys   = { alpha=>[qw(a b c)], num=>[qw(1 2 3)] };
+    my $limits = { alpha=>{ memory=>1_000 }, num=>{ memory=>2_000 } };
     my $sleep  = 1;
-    for my $group (keys %$keys)
+    for my $group (qw(num alpha))
     {
+        $self->set_limits( %{$$limits{$group}} );           # Just to show that limits can be different
         for my $suffix (@{$$keys{$group}})
         {
             my $method    = "touch";                        # Create an empty file
@@ -60,6 +64,7 @@ sub main
     # chunks from a group must finish before the group can proceed and
     # that each group can proceed independently of the others.
 
+    $self->set_limits(memory=>500);     # Just to show how to decrease the limits again
     for my $group (keys %$done)
     {
         $self->spawn('group',"$ENV{HOME}/Hello.$group",$$done{$group});
