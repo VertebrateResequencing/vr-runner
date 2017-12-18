@@ -477,12 +477,12 @@ sub set_limits
 # a job is submitted onto the farm.
 sub _update_limits
 {
-    my ($self,$wfile,$id) = @_;
+    my ($self,$limits,$wfile,$id) = @_;
     my $limits_fname = "$wfile.r.$id.limits";
     if ( !-e $limits_fname ) { return; }
-    my $limits = do "$limits_fname";
+    my $new_limits = do "$limits_fname";
     if ( $@ ) { $self->throw("do $limits_fname: $@\n"); }
-    $self->inc_limits(%$limits);
+    $self->inc_limits($limits, %$new_limits);
 }
 
 =head2 inc_limits
@@ -516,7 +516,7 @@ sub inc_limits
     {
         if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
         { 
-            $self->debugln("changing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
+            # $self->debugln("changing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
             $$dst{$key} = $args{$key};
         }
     }
@@ -752,7 +752,7 @@ sub _mark_as_finished
 
 sub _get_unfinished_jobs
 {
-    my ($self,$file2grp) = @_;
+    my ($self,$job2grp) = @_;
 
     $$self{_jobs_db_unfinished} = 0;
 
@@ -766,8 +766,7 @@ sub _get_unfinished_jobs
     my %wfiles = ();
     my $nprn_done = 0;
     my $nprn_pend = 0;
-    my $has_grp = scalar keys %$file2grp;
-    my $fgroups = {};
+    my $finished_jobs = {};
     for my $call (keys %calls)
     {
         my @list = @{$calls{$call}};
@@ -795,12 +794,7 @@ sub _get_unfinished_jobs
             {
                 if ( $nprn_done < 2 ) { $self->debugln("\to  $$job{done_file} .. " . ($ret ne '1' ? 'cached' : 'done')); $nprn_done++; }
                 elsif ( $nprn_done < 3 ) { $self->debugln("\to  ...etc..."); $nprn_done++; }
-                if ( $has_grp )
-                {
-                    my $done_file = $$job{done_file};
-                    my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
-                    push @{$$fgroups{$grp}}, $done_file;
-                }
+                $self->_add_to_finished_jobs($finished_jobs, $job2grp, $$job{done_file});
                 splice(@{$calls{$call}}, $i, 1);
                 $i--;
             }
@@ -822,7 +816,18 @@ sub _get_unfinished_jobs
         if ( !@{$calls{$call}} ) { delete($calls{$call}); }
     }
     $self->_mark_as_finished();
-    return (\%wfiles,$fgroups);
+    return (\%wfiles,$finished_jobs);
+}
+
+sub _add_to_finished_jobs
+{
+    my ($self, $finished_jobs, $job2grp, $done_file) = @_;
+    if ( !scalar keys %$job2grp ) { return; }
+    if ( !exists($$job2grp{$done_file}) ) { $$finished_jobs{'/'}{$done_file} = 1;  }
+    else
+    {
+        for my $grp (@{$$job2grp{$done_file}}) { $$finished_jobs{$grp}{$done_file} = 1; }
+    }
 }
 
 sub _init_scheduler
@@ -863,8 +868,8 @@ sub wait
 {
     my ($self,@args) = @_;
 
-    my $groups   = {};
-    my $file2grp = {};
+    my $groups  = {};   # jobs can be clustered into groups, possibly overlapping { grp1=>[1,2,3], grp2=>[2,3,4] }
+    my $job2grp = {};   # mapping from a job (wfile) to the list of groups
     my @extra_files = ();
     if ( scalar @args )
     {
@@ -873,10 +878,10 @@ sub wait
             $groups = $args[0];
             for my $grp (keys %{$args[0]})
             {
-                for my $file (@{$args[0]{$grp}}) 
+                for my $job (@{$args[0]{$grp}}) 
                 { 
-                    $file =~ s{/+}{/}g;
-                    $$file2grp{$file} = $grp; 
+                    $job =~ s{/+}{/}g;
+                    push @{$$job2grp{$job}}, $grp; 
                 }
             }
         }
@@ -900,13 +905,13 @@ sub wait
 
     my (@caller) = caller(0);
     $self->debugln("Checking the status of ", scalar @{$$self{_checkpoints}}," job(s) .. $caller[1]:$caller[2]");
-    my ($jobs,$fgroups) = $self->_get_unfinished_jobs($file2grp);
+    my ($jobs,$finished_jobs) = $self->_get_unfinished_jobs($job2grp);
 
-    if ( !scalar keys %$file2grp ) { $$self{_checkpoints} = []; }
+    if ( !scalar keys %$job2grp ) { $$self{_checkpoints} = []; }
     if ( !scalar keys %$jobs ) 
     { 
         $self->debugln("\t-> done");
-        return $fgroups; 
+        return $finished_jobs; 
     }
     my $n = 0;
     for my $wfile (keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
@@ -928,14 +933,10 @@ sub wait
                 $self->debugln("$$jobs{$wfile}{$id}{call}:\t$cmd");
                 system($cmd);
                 if ( $? ) { $self->throw("The command exited with a non-zero status $?\n"); }
-                if ( scalar keys %$file2grp )
-                {
-                    my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
-                    push @{$$fgroups{$grp}}, $done_file;
-                }
+                $self->_add_to_finished_jobs($finished_jobs, $job2grp, $done_file);
             }
         }
-        return $fgroups;
+        return $finished_jobs;
     }
 
     # Spawn to farm
@@ -990,7 +991,11 @@ sub wait
             elsif (  $js->job_done($task) )
             {
                 if ( $$self{_nocache} && !$self->is_finished($done_file) ) { $must_run = 1; }
-                else { $must_run = 0; }
+                else
+                {
+                    $must_run = 0; 
+                    $self->_add_to_finished_jobs($finished_jobs, $job2grp, $done_file);
+                }
             }
 
             # If the job has been already run and failed, check if it failed repeatedly
@@ -1076,7 +1081,7 @@ sub wait
         $self->debugln("$wfile:\t$cmd");
 
         # It is possible to run groups separately to allow for different limits
-        my $clusters = $self->_cluster_jobs($$jobs{$wfile}, \@ids, $file2grp);
+        my $clusters = $self->_cluster_jobs($$jobs{$wfile}, \@ids, $job2grp);
         for my $cluster (@$clusters)
         {
             for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
@@ -1094,35 +1099,67 @@ sub wait
         }
     }
     if ( $$self{_kill_jobs} ) { $self->all_done; }
-    for my $grp (keys %$fgroups )
+    for my $grp (keys %$finished_jobs )
     {
-        if ( exists($$groups{$grp}) && scalar @{$$groups{$grp}} == scalar @{$$fgroups{$grp}} ) { next; }
-        delete($$fgroups{$grp});
+        if ( exists($$groups{$grp}) && scalar @{$$groups{$grp}} == scalar keys %{$$finished_jobs{$grp}} ) { next; }
+        delete($$finished_jobs{$grp});
     }
-    if ( scalar keys %$fgroups ) { return $fgroups; }
+    if ( scalar keys %$finished_jobs ) { return $finished_jobs; }
     if ( $is_running ) { exit; }
     return {};
 }
 
 sub _cluster_jobs
 {
-    my ($self,$jobs,$ids,$file2grp) = @_;
+    my ($self,$jobs,$ids,$job2grp) = @_;
     my $clusters = {};
+
+    # Cluster jobs based on their group, set limits to the maximum
     for my $id (@$ids)
     {
         my $done_file = $$jobs{$id}{done_file};
         my $limits    = $$jobs{$id}{limits};
-        my $grp = exists($$file2grp{$done_file}) ? $$file2grp{$done_file} : '/';
+        my $grp = exists($$job2grp{$done_file}) ? $$job2grp{$done_file} : '/';
         if ( !exists($$clusters{$grp}) ) { $$clusters{$grp} = { limits=>{} }; }
         my $cluster = $$clusters{$grp};
         $self->inc_limits($$cluster{limits}, %$limits);
-        push @{$$cluster{ids}}, $id;
+        $$cluster{ids}{$id} = 1;
 
         my $dir = $done_file;
         $dir =~ s{[^/]+$}{};
         if ( $dir eq '' ) { $dir = './'; }
         $$cluster{dirs}{$dir} = 1;
     }
+
+    # Merge clusters if their limits are identical; this is to prevent submitting
+    # too many job arrays for each group individually
+    my %limits = ();
+    for my $grp (keys %$clusters)
+    {
+        my @sign = ('x');  # an arbitrary non-empty string
+        for my $key (keys %{$$clusters{$grp}{limits}})
+        {
+            push @sign, "$key-".(defined($$clusters{$grp}{limits}) ? $$clusters{$grp}{limits} : '');
+        }
+        my $sign = join(';',@sign);
+        push @{$limits{$sign}}, $grp;
+    }
+    for my $sign (keys %limits)
+    {
+        if ( scalar @{$limits{$sign}} == 1 ) { next; }
+        for (my $i=1; $i<@{$limits{$sign}}; $i++)
+        {
+            my $agrp = $limits{$sign}[0];
+            my $bgrp = $limits{$sign}[$i];
+            $$clusters{$agrp}{dirs} = { %{$$clusters{$agrp}{dirs}}, %{$$clusters{$bgrp}{dirs}} };
+            $$clusters{$agrp}{ids}  = { %{$$clusters{$agrp}{ids}}, %{$$clusters{$bgrp}{ids}} };
+        }
+    }
+    for my $grp (keys %$clusters)
+    {
+        $$clusters{$grp}{ids} = [ sort {$a<=>$b} keys %{$$clusters{$grp}{ids}} ];
+    }
+
     return [ values %$clusters ];
 }
 
@@ -1268,6 +1305,7 @@ sub _revive_array
     my $job = $$self{_store}{$job_id};
     $$self{_revived_file} = $freeze_file;
     $$self{_revived_job}  = $job_id;
+    $$self{_farm_options} = { %{$$job{limits}} };
 
     my $code = $self->can($$job{call});
     &$code($self,@{$$job{args}});
