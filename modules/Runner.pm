@@ -1119,16 +1119,22 @@ sub _cluster_jobs
     {
         my $done_file = $$jobs{$id}{done_file};
         my $limits    = $$jobs{$id}{limits};
-        my $grp = exists($$job2grp{$done_file}) ? $$job2grp{$done_file} : '/';
-        if ( !exists($$clusters{$grp}) ) { $$clusters{$grp} = { limits=>{} }; }
-        my $cluster = $$clusters{$grp};
-        $self->inc_limits($$cluster{limits}, %$limits);
-        $$cluster{ids}{$id} = 1;
 
         my $dir = $done_file;
         $dir =~ s{[^/]+$}{};
         if ( $dir eq '' ) { $dir = './'; }
-        $$cluster{dirs}{$dir} = 1;
+
+        my $grps = exists($$job2grp{$done_file}) ? $$job2grp{$done_file} : ['/'];
+        for my $grp (@$grps)
+        {
+            if ( !exists($$clusters{$grp}) ) { $$clusters{$grp} = { limits=>{} }; }
+            $self->inc_limits($$clusters{$grp}{limits}, %$limits);
+            $$clusters{$grp}{dirs}{$dir} = 1;
+        }
+
+        # If id belongs to multiple groups, make sure it's assigned to only
+        # one. Otherwise it would be submitted multiple times
+        $$clusters{$$grps[0]}{ids}{$id} = 1;
     }
 
     # Merge clusters if their limits are identical; this is to prevent submitting
@@ -1159,7 +1165,6 @@ sub _cluster_jobs
     {
         $$clusters{$grp}{ids} = [ sort {$a<=>$b} keys %{$$clusters{$grp}{ids}} ];
     }
-
     return [ values %$clusters ];
 }
 
