@@ -829,6 +829,17 @@ sub _add_to_finished_jobs
         for my $grp (@{$$job2grp{$done_file}}) { $$finished_jobs{$grp}{$done_file} = 1; }
     }
 }
+sub _group_finished_jobs
+{
+    my ($self,$groups,$finished_jobs) = @_;
+    my %done = ();
+    for my $grp (keys %$finished_jobs)
+    {
+        if ( !exists($$groups{$grp}) or scalar @{$$groups{$grp}} != scalar keys %{$$finished_jobs{$grp}} ) { next; }
+        $done{$grp} = $$groups{$grp};
+    }
+    return \%done;
+}
 
 sub _init_scheduler
 {
@@ -862,6 +873,9 @@ sub _init_scheduler
             <array>
                 Extra files to wait for, in addition to those registered by spawn.
 
+    Returns a hash of fully completed groups:
+            { grp1=>['done_file1','done_file2',..], grp2=>[...] }
+
 =cut
 
 sub wait
@@ -878,9 +892,12 @@ sub wait
             $groups = $args[0];
             for my $grp (keys %{$args[0]})
             {
+                my %unique = ();
                 for my $job (@{$args[0]{$grp}}) 
                 { 
                     $job =~ s{/+}{/}g;
+                    if ( exists($unique{$job}) ) { next; }
+                    $unique{$job} = 1;
                     push @{$$job2grp{$job}}, $grp; 
                 }
             }
@@ -911,7 +928,7 @@ sub wait
     if ( !scalar keys %$jobs ) 
     { 
         $self->debugln("\t-> done");
-        return $finished_jobs; 
+        return $self->_group_finished_jobs($groups, $finished_jobs); 
     }
     my $n = 0;
     for my $wfile (keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
@@ -936,7 +953,7 @@ sub wait
                 $self->_add_to_finished_jobs($finished_jobs, $job2grp, $done_file);
             }
         }
-        return $finished_jobs;
+        return $self->_group_finished_jobs($groups, $finished_jobs);
     }
 
     # Spawn to farm
@@ -1099,12 +1116,7 @@ sub wait
         }
     }
     if ( $$self{_kill_jobs} ) { $self->all_done; }
-    for my $grp (keys %$finished_jobs )
-    {
-        if ( exists($$groups{$grp}) && scalar @{$$groups{$grp}} == scalar keys %{$$finished_jobs{$grp}} ) { next; }
-        delete($$finished_jobs{$grp});
-    }
-    if ( scalar keys %$finished_jobs ) { return $finished_jobs; }
+    if ( scalar keys %$finished_jobs ) { return $self->_group_finished_jobs($groups, $finished_jobs); }
     if ( $is_running ) { exit; }
     return {};
 }
