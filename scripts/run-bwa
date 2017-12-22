@@ -832,7 +832,10 @@ sub bwa_mem
     }
     my $args = $$self{bam_tag} ? '-C' : '';
     if ( $$self{aln_args} ne '' ) { $args .= " $$self{aln_args}"; }
-    $self->cmd(qq[$$self{bwa} mem $args $$self{fa_ref} -R '$rg_line' $fastqs | $filter $$self{samtools} sort -o $bam.part]);
+    $self->cmd("mkdir -p $bam.tmpdir");
+    $self->cmd(qq[$$self{bwa} mem $args $$self{fa_ref} -R '$rg_line' $fastqs | $filter $$self{samtools} sort -o $bam.part -T $bam.tmpdir/samtools.sort]);
+    $self->cmd("rmdir $bam.tmpdir");
+
     $self->cmd("$$self{samtools} index $bam.part");
     rename("$bam.part.bai","$bam.bai") or $self->throw("rename $bam.part.bai $bam.bai: $!");
     rename("$bam.part",$bam) or $self->throw("rename $bam.part $bam: $!");
