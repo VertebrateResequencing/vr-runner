@@ -1,1 +1,157 @@
-/nfs/users/nfs_p/pd3/wtxt/logs/sandbox/vgp/polishing/run-10x-fastq
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+#   fastq list:
+#       a.1.fq.gz,a.2.fq.gz
+#       b.1.fq.gz,b.2.fq.gz
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{bxcheck}    = 'bxcheck';
+    $$self{barcodes}   = '4M-with-alts-february-2016.txt';
+    $$self{do_clean}   = 1;
+    $$self{verbose}    = 1;
+    $$self{limits}     = { memory=>5_000 };
+
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            #  config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+            bxcheck  => '] .$$self{bxcheck}. q[',
+            barcodes => '] .$$self{barcodes}. q[',
+            limits   => { memory=>5_000 },
+            do_clean => 1,
+    ]."\n";
+
+
+    $$self{usage} .= 
+        "About: Trim and error correct 10x Genomics Chromium barcodes\n" .
+        "Usage: run-qc-fastq\n" .
+        "Options:\n" .
+        "   -f, --fastq <file_list|dir>     \n" .
+        "   -o, --outdir <dir>              \n" .
+        "   -s, --sample <name>             \n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f' or $arg eq '--fastq' ) { $$self{fastq}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--sample' ) { $$self{sample}=shift(@ARGV); next; }
+        if ( $arg eq '-h' or $arg eq '?' or $arg eq '--help' ) { $self->throw(); }
+        $self->throw("Option not recognised: $arg\n");
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{fastq}) ) { $self->throw("Expected the -f option."); }
+    if ( !defined($$self{sample}) ) { $$self{sample} = 'sample'; }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+
+    $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
+
+    my $files = $self->read_files($$self{fastq});
+
+    # files:
+    #   - reads => 'path/to/reads.12.fastq.gz' or 'path/to/reads.1.fastq.gz path/to/reads.2.fastq.gz'
+    #   - name  => eg. fAnaTes1_S29_L008
+    #   + out1  => path/to/new/reads1.fastq.gz
+    #   + out2  => path/to/new/reads2.fastq.gz
+    #   + stats => path/to/new/stats.txt
+    for my $pair (keys %$files)
+    {
+        $$files{$pair}{out1}  = "$$self{outdir}/out/$pair.1.fastq.gz";
+        $$files{$pair}{out2}  = "$$self{outdir}/out/$pair.2.fastq.gz";
+        $$files{$pair}{stats} = "$$self{outdir}/out/$pair.txt";
+        $self->spawn('trim_barcodes',$$files{$pair}{stats},$$files{$pair});
+    }
+    $self->wait;
+
+    $self->create_list("$$self{outdir}/fastq.txt",$files);
+
+    $self->clean;
+    $self->all_done;
+}
+
+sub create_list
+{
+    my ($self,$list,$files) = @_;
+    open(my $fh,'>',$list) or $self->throw("$list: $!");
+    for my $pair (keys %$files)
+    {
+        print $fh "$$files{$pair}{out1},$$files{$pair}{out2}\t-\t\@RG\\tID:$$files{$pair}{name}\\tSM:$$self{sample}\n";
+    }
+    close($fh) or $self->throw("close failed: $list");
+}
+
+sub clean
+{
+    my ($self,$chunks) = @_;
+    if ( !$$self{do_clean} )  { return; }
+    $self->SUPER::clean($$self{outdir});
+    $self->cmd("rm -rf $$self{outdir}/tmp");
+}
+
+sub read_files
+{
+    my ($self,$list) = @_;
+    my %files = ();
+    if ( !-d $list )
+    {
+        open(my $fh,'<',$list) or $self->throw("$list: $!");
+        while (my $line=<$fh>)
+        {
+            chomp($line);
+            $line =~ s/,/ /;
+            my $name = 'fastq'.(1 + scalar keys %files);
+            $files{$name}{reads} = $line;
+            $files{$name}{name}  = $name;
+        }
+        close($fh) or $self->throw("close failed: $list");
+    }
+    else { $self->throw("todo\n"); }
+    return \%files;
+}
+
+sub trim_barcodes
+{
+    my ($self,$outfile,$pair) = @_;
+
+    my $cmd = "$$self{bxcheck} trim -l $$self{barcodes} $$pair{reads} -o $outfile.part";
+    $self->cmd($cmd);
+    rename("$outfile.part.1.fq.gz","$$pair{out1}") or $self->throw("rename $outfile.part.1.fq.gz $$pair{out1}");
+    rename("$outfile.part.2.fq.gz","$$pair{out2}") or $self->throw("rename $outfile.part.2.fq.gz $$pair{out2}");
+    rename("$outfile.part.txt","$$pair{stats}") or $self->throw("rename $outfile.part.txt $$pair{stats}");
+}
+
