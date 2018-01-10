@@ -475,7 +475,7 @@ sub set_limits
 # When revived, the user module can indirectly request increase of system
 # limits in the next run, see set_limits. This function is called just before
 # a job is submitted onto the farm.
-sub _update_limits
+sub _read_user_limits
 {
     my ($self,$limits,$wfile,$id) = @_;
     my $limits_fname = "$wfile.r.$id.limits";
@@ -483,6 +483,18 @@ sub _update_limits
     my $new_limits = do "$limits_fname";
     if ( $@ ) { $self->throw("do $limits_fname: $@\n"); }
     $self->inc_limits($limits, %$new_limits);
+}
+# Let the user module see what the current limits are, other jobs from the same
+# batch might have increased them
+sub _write_user_limits
+{
+    my ($self,$limits,$wfile,$id) = @_;;
+    my $limits_fname = "$wfile.r.$id.limits";
+    if ( !-e $limits_fname ) { return; }
+    open(my $fh,'>',"$limits_fname.part") or $self->throw("$limits_fname.part: $!");
+    print $fh Dumper($limits);
+    close($fh) or $self->throw("close failed: $limits_fname.part");
+    rename("$limits_fname.part",$limits_fname) or $self->throw("rename $limits_fname.part $limits_fname");
 }
 
 =head2 inc_limits
@@ -1089,7 +1101,7 @@ sub wait
         # Update limits as requested by the user module, as opposed to job scheduler
         for my $id (@ids)
         {
-            $self->_update_limits($$jobs{$wfile}{$id}{limits}, $wfile, $id);
+            $self->_read_user_limits($$jobs{$wfile}{$id}{limits}, $wfile, $id);
         }
 
         $$self{_store} = $$jobs{$wfile};
@@ -1102,6 +1114,7 @@ sub wait
         for my $cluster (@$clusters)
         {
             for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
+            for my $id (@{$$cluster{ids}}) { $self->_write_user_limits($$cluster{limits}, $wfile, $id); }
             my $ok;
             eval 
             {
