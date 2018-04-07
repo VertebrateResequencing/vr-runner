@@ -1063,7 +1063,7 @@ sub wait
                 # Increase memory limits if necessary: by a set minimum or by a percentage, which ever is greater
                 my %limits = $js->past_limits($task);
                 if ( exists($limits{MEMLIMIT}) )
-                { 
+                {
                     my $mem = $limits{memory}*1.3 > $limits{memory}+1_000 ? $limits{memory}*1.3 : $limits{memory}+1_000;
                     $self->inc_limits(\%limits, memory=>$mem);
                 }
@@ -1496,7 +1496,10 @@ sub cmd
 
     if ( $args{java_err_file} ) { $cmd = $self->_java_cmd_prep($cmd,%args); }
 
-    if ( $$self{verbose} or $args{verbose} ) { print STDERR $cmd,"\n"; }
+    my $verbose = 0;
+    if ( exists($args{verbose}) ) { $verbose = $args{verbose}; }
+    elsif ( exists($$self{verbose}) ) { $verbose = $$self{verbose}; }
+    if ( $verbose ) { print STDERR $cmd,"\n"; }
 
     # Why not to use backticks? Perl calls /bin/sh, which is often bash. To get the correct
     #   status of failing pipes, it must be called with the pipefail option.
@@ -1574,7 +1577,10 @@ sub cmd3
         return (\@out,[]);
     }
 
-    if ( $$self{verbose} or $args{verbose} ) { print STDERR $cmd,"\n"; }
+    my $verbose = 0;
+    if ( exists($args{verbose}) ) { $verbose = $args{verbose}; }
+    elsif ( exists($$self{verbose}) ) { $verbose = $$self{verbose}; }
+    if ( $verbose ) { print STDERR $cmd,"\n"; }
 
     my $tmp;
     (undef,$tmp) = File::Temp::tempfile("/tmp/runners.$$.XXXXX", OPEN=>0);
