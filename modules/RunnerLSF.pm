@@ -523,6 +523,10 @@ sub past_limits
     {
         $out{runtime} = $$task{runtime};
     }
+    if ( exists($out{memory}) && $out{memory} < $$self{default_limits}{memory} )
+    {
+        $out{memory} = $$self{default_limits}{memory};
+    }
     return %out;
 }
 
