@@ -188,6 +188,9 @@ sub list_chrs
                     cache   .. file name with chunks
             <size_bp>
                 The requested chunk size, the default is 10Mbp.
+            <ngts>
+                Chunk the files by the number of genotypes, files with many samples
+                will be split into more parts than files with few samples
             <regions>
                 List of regions to limit the chunking to (currently only whole 
                 chromosomes)
@@ -203,6 +206,8 @@ sub list
     if ( !exists($args{files}) ) { confess "the API changed, sorry about that!"; }
     if ( !exists($args{bcftools}) ) { $args{bcftools} = 'bcftools'; }
     if ( !exists($args{size_bp}) ) { $args{size_bp} = 10e6; }
+
+    my $method = exists($args{ngts}) ? 'Runner::Chunk::_chunk_vcf_by_ngts' : 'Runner::Chunk::_chunk_vcf';
 
     my $done = 1;
     for my $file (@{$args{files}})
@@ -234,7 +239,7 @@ sub list
             my @items = split(/\s+/,$chr);
             $chr = $items[0];
             if ( exists($args{regions}) && !exists($keep_chr{$chr}) ) { next; }
-            $runner->spawn('Runner::Chunk::_chunk_vcf',"$$file{cache}.$chr",$chr,%args,vcf=>$$file{vcf});
+            $runner->spawn($method,"$$file{cache}.$chr",$chr,%args,vcf=>$$file{vcf});
             push @chunks,"$$file{cache}.$chr";
         }
         $$file{chunk_files} = \@chunks;
@@ -256,6 +261,42 @@ sub list
         delete($$file{chunk_files});
     }
     return $args{files};
+}
+
+sub _chunk_vcf_by_ngts
+{
+    my ($self,$outfile,$chr,%args) = @_;
+
+    my @smpl = `$args{bcftools} query -l $args{vcf}`;
+    if ( $? ) { confess("Error: $args{bcftools} query -l $args{vcf}: $!"); }
+    my $max_nrec = scalar @smpl ? $args{ngts} / scalar @smpl : 1;
+    if ( $max_nrec < 1 ) { $max_nrec = 1; }
+
+    my ($beg, $end);
+    my $nrec = 0;
+    my $chunks = [];
+    my $cmd = "$args{bcftools} query -f'%POS\\n' $args{vcf} -r $chr";
+    open(my $fh,"$cmd |") or confess("$cmd: $!");
+    while (my $line=<$fh>)
+    {
+        if ( !defined $beg ) { $beg = $line; }
+        if ( ++$nrec < $max_nrec ) { next; }
+        $end = $line;
+        chomp($beg);
+        chomp($end);
+        push @${chunks}, { chr=>$chr, beg=>$beg, end=>$end, nrec=>$nrec };
+        $nrec = 0;
+        $beg  = undef;
+    }
+    close($fh) or confess("close failed: $cmd");
+
+    if ( @$chunks > 1 && $$chunks[-1]{nrec} < 0.2*$max_nrec )
+    {
+        my $rec = pop(@$chunks);
+        $$chunks[-1]{end}   = $$rec{end};
+        $$chunks[-1]{nrec} += $$rec{nrec};
+    }
+    _write_cache($chunks,cache=>$outfile);
 }
 
 sub _chunk_vcf
