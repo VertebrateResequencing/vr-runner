@@ -223,7 +223,7 @@ sub run
     my ($self) = @_;
     my @args = @ARGV;
 
-    $$self{_about} = "Working directory: " . getcwd() . "\nCommand line: $0 " . join(' ',@args) . "\n";
+    $$self{_about} = "Working directory: " . getcwd() . "\nCommand line: $0 " . join(' ',@args) . "\nTimestamp: ".localtime()."\n";
 
     # Parse runner system parameters. Allow mixing + and - parameters
     my @argv = ();
