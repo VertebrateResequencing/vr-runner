@@ -263,7 +263,7 @@ sub _parse_bjobs_l
     }
 
     my %months = qw(Jan 1 Feb 2 Mar 3 Apr 4 May 5 Jun 6 Jul 7 Aug 8 Sep 9 Oct 10 Nov 11 Dec 12);
-    my $year = (gmtime())[5] + 1900;
+    my $year = (localtime())[5] + 1900;
 
     my $info = {};
     my $job;
@@ -346,8 +346,8 @@ sub _parse_bjobs_l
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ ) 
         {
             if ( !exists($$job{started}) ) { confess("No wall time for job $$job{lsf_id}??", @lines); }
-            my $wall_time = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch - $$job{started};
-            if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $wall_time ) { $$job{cpu_time} = $wall_time; }
+            $$job{wall_time} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch - $$job{started};
+            if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $$job{wall_time} ) { $$job{cpu_time} = $$job{wall_time}; }
         }
         if ( $lines[$i]=~/The CPU time used is (\d+) seconds./ ) 
         { 
@@ -391,7 +391,9 @@ sub _check_job
         # bswitch to a longer queue if necessary.
 
         my $wakeup_interval = $$self{limits}{wakeup_interval} ? $$self{limits}{wakeup_interval} + 300 : 300;
-        my $time_mins = ($$job{cpu_time} / $$job{cpus} + $wakeup_interval) / 60.;
+        my $cpu_time_mins  = ($$job{cpu_time} / $$job{cpus} + $wakeup_interval) / 60.;
+        my $wall_time_mins = ($$job{wall_time} + $wakeup_interval) / 60.;
+        my $time_mins = $cpu_time_mins > $wall_time_mins ? $cpu_time_mins : $wall_time_mins;
         my $new_queue = $self->_get_queue($time_mins);
         my $cur_queue = $$job{queue};
         if ( defined $new_queue && $new_queue ne $cur_queue && $$self{queue_limits}{$new_queue} > $$self{queue_limits}{$cur_queue} )
