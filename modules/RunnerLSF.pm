@@ -386,6 +386,7 @@ sub _check_job
     if ( $$job{status}==$$self{Running} )
     {
         if ( !exists($$job{cpu_time}) ) { $$job{cpu_time} = 0; }
+        if ( !exists($$job{wall_time}) ) { $$job{wall_time} = 0; }
 
         # Estimate how long it might take before we are called again + plus 5 minutes to be safe, and
         # bswitch to a longer queue if necessary.
