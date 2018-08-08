@@ -32,7 +32,7 @@ sub new
     $$self{sawriter} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/sawriter';
     $$self{blasr} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/blasr';
     $$self{pbindex} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/pbindex';
-    $$self{samtools} = '/software/vertres/bin-external/htslib-1.5/bin/samtools';
+    $$self{samtools} = '/software/vertres/bin-external/samtools';
     $$self{gzip} = '/software/vertres/bin-external/pigz';
     $$self{blasr_options} = '--minPctIdentity 70.0 --minMatch 12 --bestn 10 --hitPolicy randombest --randomSeed 42 --nproc 16 --bam';
     $$self{arrow_options} = '-j 8';
@@ -110,6 +110,7 @@ sub main
 {
     my ($self) = @_;
     $self->parse_args();
+    $self->save_config();
 
     # uncompress or make copy of the assembly fasta
     my ($basename) = $$self{assembly} =~ m/([^\/]+)(\.gz)?$/;
@@ -246,14 +247,14 @@ sub merge
     if (scalar @$regs == 1)
     {
         my $reg = shift @$regs;
-        $self->cmd(qq[$$self{samtools} merge -R $$reg{contig} -b $fofn $outfile.part.bam]);
+        $self->cmd(qq[$$self{samtools} merge -cp -R $$reg{contig} -b $fofn $outfile.part.bam]);
     }
     else
     {
         my @region_bams;
         foreach my $reg (@$regs)
         {
-            $self->cmd(qq[$$self{samtools} merge -R $$reg{contig} -b $fofn $outfile.$$reg{contig}.bam]);
+            $self->cmd(qq[$$self{samtools} merge -cp -R $$reg{contig} -b $fofn $outfile.$$reg{contig}.bam]);
             push @region_bams, "$outfile.$$reg{contig}.bam";
         }
         $self->write_list("$outfile.list",\@region_bams);
@@ -450,4 +451,20 @@ sub write_list
         print $fh "$item\n";
     }
     close($fh) or $self->throw("Could not close $file: $!");
+}
+
+sub save_config
+{
+    my ($self) = @_;
+    my $src = exists $$self{_config} ? $$self{_config} : '';
+    my $dst = "$$self{outdir}/arrow.conf";
+    if ( -e $dst && $src && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    # if ( -e $dst && !$src) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst") if $src;
 }
