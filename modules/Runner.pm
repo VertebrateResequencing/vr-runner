@@ -364,12 +364,12 @@ sub create_lock
             $self->warn("\nIgnoring an old lock file, PID $pid is not running.\n\n");
             last;
         }
-        close($fh);
+        close($fh) or $self->throw("Failed to close $lock");
     }
 
     open(my $fh,'>',$lock) or usage(qq[$lock: $!]);
     print $fh $$ . "\n";
-    close($fh);
+    close($fh) or $self->throw("Failed to close $lock");
 }
 sub remove_lock
 {
@@ -466,9 +466,17 @@ sub set_limits
         # about the requirements, see also cmd(), _java_cmd_prep() and _java_cmd_err().
 
         my $limits_fname = "$$self{_revived_file}.$$self{_revived_job}.limits";
-        open(my $fh,'>',$limits_fname) or $self->throw("$limits_fname: $!");
+        open(my $fh,'>',"$limits_fname.part") or $self->throw("$limits_fname.part: $!");
         print $fh Dumper($$self{_farm_options});
-        close($fh);
+        close($fh) or $self->throw("close failed: $limits_fname.part");
+        rename("$limits_fname.part",$limits_fname) or $self->throw("rename $limits_fname.part $limits_fname");
+
+        # Jobs occasionally fail to recognise the increased memory limits. This may be
+        # because the failed status is visible to the spawner earlier than the file
+        # created on the remote file system. This small timeout should help without
+        # causing any harm - the job which requested the increase is just going to sit
+        # idle for one minute before exiting with an error status (see run-eagle for an example)
+        sleep(60);
     }
 }
 
@@ -663,7 +671,7 @@ sub _is_marked_as_finished
 
                 if ( !exists($$self{_max_ids}{$call}) or $$self{_max_ids}{$call}<$id ) { $$self{_max_ids}{$call} = $id; }
             }
-            close($fh);
+            close($fh) or $self->throw("Failed to close $wfile\n");
         }
         else { $is_dirty = 1; }
     }
@@ -751,7 +759,7 @@ sub _mark_as_finished
             if ( $$job{finished} ) { push @clean_ids, $$job{id}; }
             else { $all_done = 0; }
         }
-        close($fh);
+        close($fh) or $self->throw("Failed to close $wfile.part");
         if ( $$self{_js} ) 
         { 
             # Clean all jobs associated with this wfile
@@ -1601,12 +1609,12 @@ sub cmd3
     if ( open(my $fh,'<',"$tmp.o") )
     {
         @out = <$fh>;
-        close($fh);
+        close($fh) or $self->throw("Failed to close $tmp.o");
     }
     if ( open(my $fh,'<',"$tmp.e") )
     {
         @err = <$fh>;
-        close($fh);
+        close($fh) or $self->throw("Failed to close $tmp.e");
     }
     unlink("$tmp.o");
     unlink("$tmp.e");
