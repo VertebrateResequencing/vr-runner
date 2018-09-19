@@ -465,18 +465,7 @@ sub set_limits
         # fail without notifying the job scheduler, the user commands must notify
         # about the requirements, see also cmd(), _java_cmd_prep() and _java_cmd_err().
 
-        my $limits_fname = "$$self{_revived_file}.$$self{_revived_job}.limits";
-        open(my $fh,'>',"$limits_fname.part") or $self->throw("$limits_fname.part: $!");
-        print $fh Dumper($$self{_farm_options});
-        close($fh) or $self->throw("close failed: $limits_fname.part");
-        rename("$limits_fname.part",$limits_fname) or $self->throw("rename $limits_fname.part $limits_fname");
-
-        # Jobs occasionally fail to recognise the increased memory limits. This may be
-        # because the failed status is visible to the spawner earlier than the file
-        # created on the remote file system. This small timeout should help without
-        # causing any harm - the job which requested the increase is just going to sit
-        # idle for one minute before exiting with an error status (see run-eagle for an example)
-        sleep(60);
+        $self->_write_user_limits($$self{_farm_options}, $$self{_revived_file}, $$self{_revived_job});
     }
 }
 
@@ -485,8 +474,8 @@ sub set_limits
 # a job is submitted onto the farm.
 sub _read_user_limits
 {
-    my ($self,$limits,$wfile,$id) = @_;
-    my $limits_fname = "$wfile.r.$id.limits";
+    my ($self,$limits,$rfile,$id) = @_;
+    my $limits_fname = "$rfile.$id.limits";
     if ( !-e $limits_fname ) { return; }
     my $new_limits = do "$limits_fname";
     if ( $@ ) { $self->throw("do $limits_fname: $@\n"); }
@@ -496,9 +485,9 @@ sub _read_user_limits
 # batch might have increased them
 sub _write_user_limits
 {
-    my ($self,$limits,$wfile,$id) = @_;;
-    my $limits_fname = "$wfile.r.$id.limits";
-    if ( !-e $limits_fname ) { return; }
+    my ($self,$limits,$rfile,$id) = @_;;
+    if ( !scalar keys %$limits ) { return; }
+    my $limits_fname = "$rfile.$id.limits";
     open(my $fh,'>',"$limits_fname.part") or $self->throw("$limits_fname.part: $!");
     print $fh Dumper($limits);
     close($fh) or $self->throw("close failed: $limits_fname.part");
@@ -553,6 +542,10 @@ sub inc_limits
 sub get_limits
 {
     my ($self,$arg) = @_;
+    if ( exists($$self{_revived_file}) )
+    {
+        $self->_read_user_limits($$self{_farm_options}, $$self{_revived_file}, $$self{_revived_job});
+    }
     if ( ! defined $arg ) { return %{$$self{_farm_options}}; }
     return exists($$self{_farm_options}{$arg}) ? $$self{_farm_options}{$arg} : undef;
 }
@@ -1107,13 +1100,14 @@ sub wait
         $is_running += scalar @ids;
 
         # Update limits as requested by the user module, as opposed to job scheduler
+        my $rfile = $self->_get_temp_prefix($wfile) . '.r';
         for my $id (@ids)
         {
-            $self->_read_user_limits($$jobs{$wfile}{$id}{limits}, $wfile, $id);
+            $self->_read_user_limits($$jobs{$wfile}{$id}{limits}, $rfile, $id);
         }
 
         $$self{_store} = $$jobs{$wfile};
-        my $rfile = $self->freeze($wfile);
+        $self->freeze($wfile);
         my $cmd = qq[$0 +run $rfile {JOB_INDEX}];
         $self->debugln("$wfile:\t$cmd");
 
@@ -1122,7 +1116,7 @@ sub wait
         for my $cluster (@$clusters)
         {
             for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
-            for my $id (@{$$cluster{ids}}) { $self->_write_user_limits($$cluster{limits}, $wfile, $id); }
+            for my $id (@{$$cluster{ids}}) { $self->_write_user_limits($$cluster{limits}, $rfile, $id); }
             my $ok;
             eval 
             {
