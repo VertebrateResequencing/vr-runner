@@ -26,6 +26,7 @@ sub new
 
     $$self{config_version} = '1427807557';
     $$self{java_memstep}   = 2000;
+    $$self{nbatch} = 1;
 
     $$self{usage} .= 
         "About: Small pipeline to parallelize series of commands\n" .
@@ -34,6 +35,7 @@ sub new
         "   -C, --cmd <cmd>         Command to run\n" .
         "   -c, --cmds <file>       List of commands to run\n" .
         "   -l, --limits <string>   Limits to use, e.g. runtime=60,memory=5000\n" .
+        "   -n, --nbatch <int>      Run commands in batches of <int> jobs\n" .
         "   -t, --tmpdir <dir>      Directory for temporary files\n" .
         "\n";
 
@@ -49,6 +51,7 @@ sub parse_args
         if ( $arg eq '-C' or $arg eq '--cmd' ) { $$self{cmd}=shift(@ARGV); next; }
         if ( $arg eq '-c' or $arg eq '--cmds' ) { $$self{inlist}=shift(@ARGV); next; }
         if ( $arg eq '-l' or $arg eq '--limits' ) { $limits=shift(@ARGV); next; }
+        if ( $arg eq '-n' or $arg eq '--nbatch' ) { $$self{nbatch}=shift(@ARGV); next; }
         if ( $arg eq '-t' or $arg eq '--tmpdir' ) { $$self{tmpdir}=shift(@ARGV); next; }
         $self->throw();
     }
@@ -62,6 +65,7 @@ sub parse_args
             $$self{limits}{$key} = $val;
         }
     }
+    if ( $$self{nbatch} <= 0 ) { $self->throw("Expected value bigger than 0 with --nbatch."); }
 }
 
 sub main
@@ -75,9 +79,11 @@ sub main
 
     $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
 
-    for (my $i=0; $i<@cmds; $i++)
+    for (my $i=0; $i<@cmds; $i+=$$self{nbatch})
     {
-        $self->spawn('run_command',"$$self{tmpdir}/done/$i.done",$cmds[$i]);
+        my $end = $i + $$self{nbatch} - 1;
+        if ( $end > $#cmds ) { $end = $#cmds; }
+        $self->spawn('run_command',"$$self{tmpdir}/done/$i.done",[@cmds[$i..$end]]);
     }
     $self->wait;
 
@@ -112,26 +118,28 @@ sub list_cmds
 
 sub run_command
 {
-    my ($self,$outfile,$cmd) = @_;
-
-    if ( $cmd=~/^\S*java\s+/ && $cmd=~/\s+-Xm[sx](\S+)/ )
+    my ($self,$outfile,$cmds) = @_;
+    for my $cmd (@$cmds)
     {
-        my $xmx = $1;
-        if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1000; }
-        elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
+        if ( $cmd=~/^\S*java\s+/ && $cmd=~/\s+-Xm[sx](\S+)/ )
+        {
+            my $xmx = $1;
+            if ( $xmx=~/(\S+)g$/i ) { $xmx = $1*1000; }
+            elsif ( $xmx=~/(\S+)m$/i ) { $xmx = $1; }
 
-        my $mem = int($self->get_limits('memory') * 0.9);
-        if ( $mem<=0 ) { $mem = 500; }
-        if ( $mem < $xmx ) { $mem = $xmx; }
+            my $mem = int($self->get_limits('memory') * 0.9);
+            if ( $mem<=0 ) { $mem = 500; }
+            if ( $mem < $xmx ) { $mem = $xmx; }
 
-        $cmd =~ s/-Xms\S+/-Xms${mem}m/;
-        $cmd =~ s/-Xmx\S+/-Xmx${mem}m/;
+            $cmd =~ s/-Xms\S+/-Xms${mem}m/;
+            $cmd =~ s/-Xmx\S+/-Xmx${mem}m/;
 
-        $self->java_cmd($cmd,"$outfile.java");
-    }
-    else
-    {
-        $self->cmd($cmd,verbose=>1);
+            $self->java_cmd($cmd,"$outfile.java");
+        }
+        else
+        {
+            $self->cmd($cmd,verbose=>1);
+        }
     }
     $self->cmd("touch $outfile");
 }
