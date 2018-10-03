@@ -642,7 +642,7 @@ sub run_jobs
     my ($self,$job_name,$cmd,$ids) = @_;
     my $jids_file = "$job_name.jid";
 
-    if ( !scalar @$ids ) { confess("No IDs given??\n"); }
+    if ( !scalar @$ids ) { confess("No IDs given?? $job_name: $cmd\n"); }
 
     $cmd =~ s/{JOB_INDEX}/\$LSB_JOBINDEX/g;
     my $bsub_opts = $self->_create_bsub_opts_string();

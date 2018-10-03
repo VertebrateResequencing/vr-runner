@@ -127,7 +127,7 @@ package Runner;
 use strict;
 use warnings;
 use Carp;
-use Storable qw(nstore retrieve dclone);
+use Storable qw(nstore retrieve dclone freeze);
 use File::Temp;
 use Data::Dumper;
 use Cwd;
@@ -550,16 +550,16 @@ sub get_limits
     return exists($$self{_farm_options}{$arg}) ? $$self{_farm_options}{$arg} : undef;
 }
 
-=head2 freeze
+=head2 _freeze
 
     About : freeze the runner object
-    Usage : $self->freeze();
+    Usage : $self->_freeze();
     Args  : <file>
                 Targe checkpoint file name (optional)
 
 =cut
 
-sub freeze
+sub _freeze
 {
     my ($self,$arg) = @_;
     my $rfile = $self->_get_temp_prefix($arg) . '.r';
@@ -577,11 +577,9 @@ sub freeze
     nstore($self,"$rfile.part");
     if ( defined $rfile_prev )
     {
-        my $md5_ori = `md5sum $rfile`;
-        my $md5_new = `md5sum $rfile.part`;
-        $md5_ori =~ s/\s+.*$//;
-        $md5_new =~ s/\s+.*$//;
-        if ( $md5_ori eq $md5_new )
+        my $store_ori = freeze($$rfile_prev{_store}).freeze($$rfile_prev{_farm_options});
+        my $store_new = freeze($$self{_store}).freeze($$self{_farm_options});
+        if ( $store_ori eq $store_new )
         {
             unlink("$rfile.part");
             return $rfile;
@@ -619,6 +617,8 @@ sub spawn
     my ($self,$call,@args) = @_;
 
     if ( !$self->can($call) ) { $self->throw("No such method: [$call]\n"); }
+    if ( exists($$self{_spawned}{$args[0]}) ) { $self->throw("The checkpoint file is not unique in $call: $args[0]\n"); }
+    $$self{_spawned}{$args[0]} = 1;
 
     # Register the job
     my $job = {
@@ -895,6 +895,7 @@ sub wait
 {
     my ($self,@args) = @_;
 
+    $$self{_spawned} = {};  # simple sanity-check to prevent the use of the same checkpoint multiple times by mistake
     my $groups  = {};   # jobs can be clustered into groups, possibly overlapping { grp1=>[1,2,3], grp2=>[2,3,4] }
     my $job2grp = {};   # mapping from a job (wfile) to the list of groups
     my @extra_files = ();
@@ -903,6 +904,13 @@ sub wait
         if ( ref($args[0]) eq 'HASH' )
         {
             $groups = $args[0];
+            if ( exists($$self{_checkpoints}) && @{$$self{_checkpoints}} )
+            {
+                for my $chk (@{$$self{_checkpoints}})
+                {
+                    push @{$$groups{__all__}}, $$chk{done_file};
+                }
+            }
             for my $grp (keys %{$args[0]})
             {
                 my %unique = ();
@@ -954,7 +962,7 @@ sub wait
         for my $wfile (keys %$jobs)
         {
             $$self{_store} = $$jobs{$wfile};
-            my $rfile = $self->freeze($wfile);
+            my $rfile = $self->_freeze($wfile);
             for my $id (sort {$a<=>$b} keys %{$$jobs{$wfile}})
             {
                 my $done_file = $$jobs{$wfile}{$id}{done_file};
@@ -1107,7 +1115,7 @@ sub wait
         }
 
         $$self{_store} = $$jobs{$wfile};
-        $self->freeze($wfile);
+        $self->_freeze($wfile);
         my $cmd = qq[$0 +run $rfile {JOB_INDEX}];
         $self->debugln("$wfile:\t$cmd");
 
@@ -1169,6 +1177,8 @@ sub _cluster_jobs
     my %limits = ();
     for my $grp (keys %$clusters)
     {
+        if ( !exists($$clusters{$grp}{ids}) ) { next; } # this group may have no active jobs
+
         my @sign = ('x');  # an arbitrary non-empty string
         for my $key (keys %{$$clusters{$grp}{limits}})
         {
@@ -1191,6 +1201,7 @@ sub _cluster_jobs
     for my $grp (keys %$clusters)
     {
         $$clusters{$grp}{ids} = [ sort {$a<=>$b} keys %{$$clusters{$grp}{ids}} ];
+        if ( !@{$$clusters{$grp}{ids}} ) { delete($$clusters{$grp}); }
     }
     return [ values %$clusters ];
 }
