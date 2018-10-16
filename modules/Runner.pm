@@ -427,6 +427,24 @@ sub _sample_config
     $self->all_done;
 }
 
+=head2 set_temp_dir
+
+    About : Set temporary directory for .jobs files. If not called, it is determined
+            automatically from the output file names.
+    Usage : $self->set_temp_dir('/path/to/directory');
+    Args  : <dir>
+                Directory name
+                
+=cut
+
+sub set_temp_dir
+{
+    my ($self,$dir) = @_;
+    $dir =~ s{/+$}{};
+    $dir =~ s{/+}{/}g;
+    $$self{_temp_dir} = [ split(m{/},$dir) ];
+}
+
 =head2 set_limits
 
     About : Set time and memory requirements for computing farm
@@ -1403,11 +1421,50 @@ sub _get_temp_prefix
 sub _get_temp_dir
 {
     my ($self,$fname) = @_;
+
+    if ( !exists($$self{_temp_dir}) )
+    {
+        my @items = split(m{/}, $fname);
+        my $len = length($fname);
+        if ( substr($fname,$len-1,1) ne '/' ) { splice(@items, -1); }
+        if ( @items && $items[-1] eq '.jobs' ) { splice(@items,-1); }
+        return join('/',@items,'.jobs');
+    }
+
+    # outdir/file   -> outdir/.jobs/file
+    # /path/to/file -> $temp_dir/.jobs/path/to/file
+
+    my $is_dir = $fname=~m{/$} ? 1 : 0;
+    $fname =~ s{/$}{};
+    $fname =~ s{/+}{/}g;
+    my @tmp   = @{$$self{_temp_dir}};
     my @items = split(m{/}, $fname);
-    my $len = length($fname);
-    if ( substr($fname,$len-1,1) ne '/' ) { splice(@items, -1); }
-    if ( @items && $items[-1] eq '.jobs' ) { splice(@items,-1); }
-    return join('/',@items,'.jobs');
+    if ( !$is_dir ) { splice(@items,-1); }
+
+    my $path;
+    if ( @tmp <= @items )
+    {
+        my $inside_temp_dir = 1;
+        for (my $i=0; $i<@tmp; $i++)
+        {
+            if ( $tmp[$i] ne $items[$i] ) { $inside_temp_dir = 0; last; }
+        }
+        if ( $inside_temp_dir )
+        {
+            if ( @items > @tmp && $items[@tmp] eq '.jobs' ) { $path = join('/',@items); }
+            else { splice(@items,0,scalar @tmp); }
+        }
+    }
+    if ( !defined $path )
+    {
+        $path = join('/',@{$$self{_temp_dir}},'.jobs');
+        if ( @items )
+        {
+            $items[0] =~ s{^/}{};
+            $path = join('/',$path,@items);
+        }
+    }
+    return $path;
 }
 
 sub _mkdir
@@ -1415,7 +1472,11 @@ sub _mkdir
     my ($self,$fname) = @_;
     $fname =~ s{[^/]+$}{};
     if ( $fname eq '' ) { $fname = './'; }
-    if ( !-e $fname ) { `mkdir -p $fname`; }
+    if ( !-e $fname )
+    {
+        `mkdir -p $fname`;
+        if ( $? ) { $self->throw("Cannot create directory: $fname"); }
+    }
     return $fname;
 }
 
@@ -1449,7 +1510,8 @@ sub _java_cmd_prep
     my $xmx = $self->get_java_limits($cmd);
     if ( !defined $xmx ) { return $cmd; }
 
-    my $mem = int($self->get_limits('memory') * 0.9);
+    my $mem = $self->get_limits('memory');
+    $mem = defined $mem ? int($mem*0.9) : 0;
     if ( $mem <= 0 ) { $mem = 500; }
     if ( $mem < $xmx ) { $mem = $xmx; }
 
