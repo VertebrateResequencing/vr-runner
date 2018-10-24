@@ -541,7 +541,7 @@ sub inc_limits
     }
     for my $key (keys %args)
     {
-        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
+        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or !defined($args{$key}) or $$dst{$key}<$args{$key} ) 
         { 
             # $self->debugln("changing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
             $$dst{$key} = $args{$key};
