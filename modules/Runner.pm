@@ -1073,9 +1073,11 @@ sub wait
                         my $msg = 
                             "The job failed repeatedly, ${nfailures}x: $wfile.$ids[$i].[eo]\n" .
                             "What next?\n" .
-                            " - Retry the step by running with +retries $nfailures\n" .
-                            " - Reset the status by running with +reset $prefix\n" .
-                            " - Skip the failing job by running with negative value of +retries\n\n";
+                            " - Look in the outputs and see what happened: $wfile.$ids[$i].[eo]\n" .
+                            " - If the failure was due a temporary problem, retry the step by running with `+retries $nfailures`\n" .
+                            " - Skip the failing job by running with negative value of retries, e.g. `+retries -$nfailures`\n" .
+                            " - To start with a clean slate, reset the jobs by running with `+reset $prefix`\n" .
+                            "\n";
 
                         $self->_send_email('failed', "The runner failed repeatedly\n", $$self{_about}, "\n", $msg);
                         $self->throw($msg);
