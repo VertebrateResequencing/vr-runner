@@ -223,7 +223,7 @@ sub run
     my ($self) = @_;
     my @args = @ARGV;
 
-    $$self{_about} = "Working directory: " . getcwd() . "\nCommand line: $0 " . join(' ',@args) . "\nTimestamp: ".localtime()."\n";
+    $$self{_about} = "Working directory: " . getcwd() . "\nCommand line: $0 " . join(' ',@args) . "\n";
 
     # Parse runner system parameters. Allow mixing + and - parameters
     my @argv = ();
@@ -327,7 +327,7 @@ sub run
             $self->remove_lock();
             return; 
         }
-        $self->debugln($$self{_about}, "sleeping for $$self{_loop} seconds...");
+        $self->debugln($$self{_about}._timestamp(), "sleeping for $$self{_loop} seconds...");
         sleep($$self{_loop});
     }
 }
@@ -409,6 +409,11 @@ sub _read_config
         $$self{$key} = dclone($value);
     }
     $$self{_config} = $config;
+}
+
+sub _timestamp
+{
+    return "Timestamp: ".localtime()."\n";
 }
 
 sub _sample_config
@@ -595,8 +600,9 @@ sub _freeze
     nstore($self,"$rfile.part");
     if ( defined $rfile_prev )
     {
-        my $store_ori = freeze($$rfile_prev{_store}).freeze($$rfile_prev{_farm_options});
-        my $store_new = freeze($$self{_store}).freeze($$self{_farm_options});
+        # Check if it is necessary to update the .r file - anything changed?
+        my $store_ori = freeze($rfile_prev);
+        my $store_new = freeze($self);
         if ( $store_ori eq $store_new )
         {
             unlink("$rfile.part");
@@ -1079,7 +1085,7 @@ sub wait
                             " - To start with a clean slate, reset the jobs by running with `+reset $prefix`\n" .
                             "\n";
 
-                        $self->_send_email('failed', "The runner failed repeatedly\n", $$self{_about}, "\n", $msg);
+                        $self->_send_email('failed', "The runner failed repeatedly\n", $$self{_about}._timestamp(), "\n", $msg);
                         $self->throw($msg);
                     }
                 }
@@ -1239,7 +1245,7 @@ sub all_done
 {
     my ($self) = @_;
     $self->debugln("All done!");
-    $self->_send_email('done', "The runner has finished, all done!\n", $$self{_about});
+    $self->_send_email('done', "The runner has finished, all done!\n", $$self{_about}._timestamp());
     exit $$self{_status_codes}{DONE};
 }
 
