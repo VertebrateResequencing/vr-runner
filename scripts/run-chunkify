@@ -29,7 +29,7 @@ sub new
     $$self{bcftools} = 'bcftools';
     $$self{do_clean} = 1;
     $$self{limits} = { runtime=>24*60 };
-    $$self{config_version} = '1394700014';
+    $$self{config_version} = '1543497890';
     $$self{_sampleconf} = q[
 
         bcftools    => '] .$$self{bcftools}. q[',
@@ -39,56 +39,66 @@ sub new
         # developed to parallelize VCF operations but can be used in other
         # contexts as well.
         #
-        # 1) Define chunks. Currently there are two possibilities how to do this:
-        #   - split by number of sites in a VCF (vcf_sites)
-        #   - list genomic regions and chunk sizes (regions, chunk_size, fai) - TODO
-        # vcf_sites => 100_000,
-        regions     => [ 20, 11],
-        chunk_size  => 1_000_000,
-        #fai         => '/lustre/scratch105/projects/g1k/ref/main_project/human_g1k_v37.fasta.fai',
+        # 1) Select files in the input directory on which the commands below 
+        #    will be executed. The files will be processed in parallel.
+        input => [qw(*.vcf.gz *.bcf)],
 
+        # 2) Define chunks. Currently there are two possibilities how to do this:
+        #   - split by number of sites in a VCF (chunk_nsites)
+        #   - by genomic coordinates (chunk_bp)
+        #   - by number of enotypes (chunk_ngts)
+        # chunk_nsites => 100_000,
+        regions        => [ 20, 11],
+        chunk_bp       => 1_000_000,
 
-        # 2) Specifiy the command to run. By default, it will be used as:
-        #   tabix -h $input $region | $cmd | bgzip -c > $output
-        # In case that the input key below does not exist or is an array
-        # reference instead of a string, the command will be used in the
-        # following form:
-        #   $cmd | bgzip -c > $output
-        # In the latter case, the string {REGION} is expected to be part of the command
-        # and will be expanded accordingly. 
+        # 3) Specify the commands to run. 
         #
-        # The list of variables:
-        #   {INPUT}
-        #   {BNAME}    # {INPUT} with any leading directory components removed
-        #   {OUTPUT}
-        #   {REGION}
-        #   {CHR}
-        #   {BEG}
-        #   {END}
+        # Config variables can be referenced using curly brackets ({variable}).
+        # The following variables are pre-defined:
+        #   {outdir} .. alias for the argument to --outdir
+        #   {in}     .. input chunk name (includes the directory part)
+        #   {name}   .. output chunk name (relative), generated from basename of {in}.
+        #               In case of name clashes, the suffix "_<int>" is added
+        #               automatically to ensure uniqueness.
+        #   {out}    .. output file, alias for {outdir}/out/{name}
+        #   {tmpdir} .. working directory, alias for {outdir}/tmp/{name}. Created automatically
+        #               and deleted when finished.
+        #   {chr}    .. chromosome name of the chunk
+        #   {beg}    .. start coordinate of the chunk (1-based, inclusive)
+        #   {end}    .. end coordinate of the chunk (1-based, inclusive)
+        #   {region} .. shortcut for {chr}:{beg}-{end}
         #
-        # Examples:
-        #   cmd => 'wc -l',
-        #   cmd => 'vcf-merge -r {REGION} {INPUT}',
-        #   cmd => 'bcftools check -r {REGION} A.vcf.gz B.vcf.gz'
-        #   cmd => q[bcftools view -r {REGION} {INPUT} -i'POS>={BEG}' -Ou | bcftools call -mv -Ob -o {OUTPUT}],
+        # Commands to be executed for each input chunk. For example:
+        # cmds => 
+        # [
+        #     q[{bcftools} annotate ... {in} -i 'POS>={beg}' -r {region} -Ob -o {tmpdir}/1.bcf],
+        #     q[{bcftools} index {tmpdir}/1.bcf],
+        #     q[... {tmpdir}/1.bcf {tmpdir}/2.bcf && rm -f {tmpdir}/1.bcf],
+        #     q[... {tmpdir}/2.bcf {out} && {bcftools} index {out} && rm -f {tmpdir}/2.bcf],
+        # ],
+        #
+        # Limits can be increased for selected commands as follows:
+        # limits =>
+        # [
+        #     undef,
+        #     { memory=>7_000 },
+        #     { memory=>undef },
+        #     undef,
+        # ],
 
-
-        # 3) Set optional keys to determine how the outputs should be merged.
+        # 4) Set optional keys to determine how the outputs should be merged.
         # If not set, the chunks will be concatenated as they are. Otherwise,
         # `bcftools concat` will be used. Todo: allow user-defined command to merge
         # the outputs.
         vcf_concat => 1,
 
+
         # Tabix reports the same record in two different chunks when an indel overlaps
         #   region boundary. These duplicate records will be removed when the key 
         #   fix_overlaps is set; the value is interpreted as the 1-based index of the
         #   position column, i.e. 2 for VCF. If set to 0, the overlaps will not be fixed.
-        fix_overlaps => 2,
-
-
-        # The input and output file can be also given on command line (-i,-o)
-        # input  => 'input.vcf.gz',
-        # output => 'output.vcf.gz',
+        #   With bcftools one can run with -i 'POS>={beg}' to avoid these issues.
+        fix_overlaps => 0,
 
         do_clean => '] .$$self{do_clean}. q[',
 
@@ -97,6 +107,7 @@ sub new
         #
         # What changed since version:
         #   1376393805 .. Switched from "vcf-concat" to "bcftools concat"
+        #   1394700014 .. Multiple commands can be given via the "cmds" key, major change of syntax.
         #
         version  => '] .$$self{config_version}. q[',
     ]."\n";
@@ -104,9 +115,9 @@ sub new
     $$self{usage} .= 
         "Usage: run-chunkify\n" .
         "Options:\n" .
-        "   -c, --command <cmd>             The command to run (equal to the \"cmd\" config key)\n" .
-        "   -i, --input <file.vcf.gz>       Input file [optional]\n" .
-        "   -o, --output <file.vcf.gz>      Output file\n" .
+        "   -c, --command <cmd>       The command to run (equal to the \"cmd\" config key)\n" .
+        "   -i, --input <expr>        Input files wildcard\n" .
+        "   -o, --outdir <dir>        Output directory\n" .
         "\n";
 
     return $self;
@@ -121,27 +132,17 @@ sub parse_args
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-c' or $arg eq '--command' ) { $$self{cmd}=shift(@ARGV); next; }
-        if ( $arg eq '-o' or $arg eq '--output' ) { push @{$$self{output}}, shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
         if ( $arg eq '-i' or $arg eq '--input' ) { push @{$$self{input}}, shift(@ARGV); next; }
     }
-    if ( !@{$$self{input}} or !@{$$self{output}} ) { $self->throw(); }
-    if ( @{$$self{input}} != @{$$self{output}} ) { $self->throw("Expected -i,-o of the same length"); }
+    if ( !@{$$self{input}} ) { $self->throw("Missing the -i option or the config key 'input')\n"); }
+    if ( !defined $$self{outdir} ) { $self->throw("Missing the -o option or the config key 'outdir')\n"); }
     if ( !exists($$self{version}) or $$self{version} ne $$self{config_version} )
     {
         $self->throw("Warning: Your config file may be out of date, the latest version key is \"$$self{config_version}\". Please run with +sampleconf to see what changed.\n");
     }
-    if ( !exists($$self{cmd}) ) { $self->throw("Missing the command."); }
-    if ( !defined($$self{chunk_size}) ) { $self->throw("Expected \"chunk_size\" key\n"); }
-    for my $output (@{$$self{output}})
-    {
-        my $outdir;
-        if ( $output=~/\.vcf.gz$/ ) { $outdir = $`; }
-        elsif ( $output=~/\.tab.gz$/ ) { $outdir = $`; }
-        elsif ( $output=~/\.bcf$/ ) { $outdir = $`; }
-        elsif ( $output=~/\.[^\.]+$/ ) { $outdir = $`; }
-        else { $self->throw("todo: $output\n"); }
-        push @{$$self{outdir}},$outdir;
-    }
+    if ( !exists($$self{cmds}) ) { $self->throw("Missing the commands."); }
+    if ( exists($$self{limits}) && ref($$self{limits}) ne 'ARRAY' ) { $self->throw("The key 'limits' should be an array\n"); }
 }
 
 sub main
@@ -149,46 +150,48 @@ sub main
     my ($self) = @_;
     $self->parse_args();
 
-    my $done = 0;
-    for (my $i=0; $i<@{$$self{output}}; $i++)
+    my $chunks = $self->init_chunks();
+
+    my $i;
+    for ($i=0; $i<@{$$self{cmds}}; $i++)
     {
-        if ( $self->is_finished($$self{output}[$i]) ) { $done++; next; }
-    }
-    if ( $done==@{$$self{output}} )
-    {
-        for (my $i=0; $i<@{$$self{output}}; $i++)
+        if ( exists($$self{limits}) && exists($$self{limits}[$i]) && ref($$self{limits}[$i]) eq 'HASH' )
         {
-            $self->clean($$self{outdir}[$i]) unless !$$self{do_clean};
+            $self->set_limits(%{$$self{limits}[$i]});
         }
-        $self->all_done; 
+        for my $file (@$chunks)
+        {
+            for my $chunk (@{$$file{chunks}})
+            {
+                my $cmd  = $$self{cmds}[$i];
+                my $task = $self->expand_vars($cmd,%$chunk);
+                $self->spawn('run_command',"$$chunk{tmpdir}/done.$i",$task);
+            }
+        }
+        $self->wait;
+    }
+    if ( exists($$self{limits}) && exists($$self{limits}[$i]) && ref($$self{limits}[$i]) eq 'HASH' )
+    {
+        $self->set_limits(%{$$self{limits}[$i]});
     }
 
-    my $chunks = $self->init_chunks();
+    my $done = 0;
     for my $file (@$chunks)
     {
-        for my $chunk (@{$$file{chunks}})
-        {
-            my $region = "$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
-            $self->spawn('run_cmd',"$$file{outdir}/$$chunk{chr}/$region",$$file{vcf},$chunk);
-        }
+        $self->spawn('concat',$$file{out},$$file{chunks});
     }
     $self->wait;
 
-    for (my $i=0; $i<@$chunks; $i++)
-    {
-        my $file = $$chunks[$i];
-        $self->spawn('concat',$$self{output}[$i],$$self{outdir}[$i],$$file{chunks});
-    }
-    $self->wait;
+    #   
+    #       #   # Run performance stats and clean
+    #       #   $self->spawn('runtime_stats',"$outdir/runtime");
+    #       #   $self->wait;
+    #   
+    #       for (my $i=0; $i<@{$$self{output}}; $i++)
+    #       {
+    #           $self->clean($$self{outdir}[$i]) unless !$$self{do_clean};
+    #       }
 
-    #   # Run performance stats and clean
-    #   $self->spawn('runtime_stats',"$outdir/runtime");
-    #   $self->wait;
-
-    for (my $i=0; $i<@{$$self{output}}; $i++)
-    {
-        $self->clean($$self{outdir}[$i]) unless !$$self{do_clean};
-    }
     $self->all_done;
 }
 
@@ -198,25 +201,106 @@ sub clean
     $self->SUPER::clean($outdir);
 }
 
+sub unique_name
+{
+    my ($self,$names,$file) = @_;
+    my $new_name = $file;
+    $new_name =~ s{^.*/}{};     # strip directory
+        my $idx = 1;
+    while ( exists($$names{$new_name}) )
+    {
+        $new_name = $file .'_'. $idx;
+        $idx++;
+    }
+    $$names{$new_name} = 1;
+    return $new_name;
+}
 sub init_chunks
 {
     my ($self) = @_;
-    my @files;
-    for (my $i=0; $i<@{$$self{input}}; $i++)
+
+    my %names = ();
+    my @files = ();
+    for my $expr (@{$$self{input}})
     {
-        my $outdir = $$self{outdir}[$i];
-        push @files, { vcf=>$$self{input}[$i], cache=>"$outdir/chunks.txt", outdir=>$outdir };
+        my @tmp = glob($expr);
+        for my $file (@tmp)
+        {
+            my $dir   = '.';
+            my $bname = $file; 
+            if ( $bname=~m{^(.+)/} ) { $dir = $1; $bname = $'; }
+            if ( !defined $bname ) { $self->throw("Expected file name, not a directory: $expr .. $file\n"); }
+            my $name = $self->unique_name(\%names,$bname);
+            push @files,
+            {
+                # for run-chunkify
+                indir   => $dir,       # input directory
+                infile  => $bname,     # input file name with directory stripped
+                name    => $name,      # tmp/output file name with directory stripped. Can be suffixed with _<int> in case of conflicts
+                out     => "$$self{outdir}/out/$name",
+
+                # for Runner::Chunk
+                vcf     => $file,
+                cache   => "$$self{outdir}/chunks/$name.txt",
+            };
+        }
     }
+
     my %args =
     (
         bcftools => $$self{bcftools},
-        size_bp  => $$self{chunk_size},
         files    => \@files,
     );
     if ( defined($$self{regions}) ) { $args{regions} = $$self{regions}; }
+
+    if ( defined($$self{chunk_gts}) ) { $args{ngts} = $$self{chunk_gts}; }
+    elsif ( defined($$self{chunk_nsites}) ) { $args{nsites} = $$self{chunk_nsites}; }
+    elsif ( defined($$self{chunk_bp}) ) { $args{size_bp} = $$self{chunk_bp}; }
+
     my $chunks = $self->Runner::Chunk::list(%args) or $self->throw("Could not create chunks: $!");
+    for (my $i=0; $i<@files; $i++)
+    {
+        my $split_file = $$chunks[$i];
+        for my $chunk (@{$$split_file{chunks}})
+        {
+            $$chunk{indir}  = $$split_file{indir};
+            $$chunk{infile} = $$split_file{infile};
+            $$chunk{name}   = $$split_file{name};
+            $$chunk{tmpdir} = "$$self{outdir}/tmp/$$split_file{name}/$$chunk{chr}/$$chunk{beg}-$$chunk{end}";
+            $$chunk{out}    = "$$self{outdir}/tmp/$$split_file{name}/$$chunk{chr}/$$chunk{beg}-$$chunk{end}.$$split_file{name}";
+            $$chunk{region} = "$$chunk{chr}:$$chunk{beg}-$$chunk{end}";
+        }
+    }
     return $chunks;
 }
+
+sub expand_vars
+{
+    my ($self,$str,%args) = @_;
+    my $ori = $str;
+    my $out = '';
+    while ( $str=~/{([^}]+)}/ )
+    {
+        $out .= $`;
+        my $key = $1;
+        if ( $key eq 'in' ) { $key = "$args{indir}/$args{infile}"; }
+        elsif ( $key eq 'out' ) { $key = "$args{out}"; }
+        elsif ( exists($args{$key}) ) { $key = $args{$key}; }
+        elsif ( exists($$self{$key}) ) { $key = $$self{$key}; }
+        else { $self->throw("No such key [$key] [$ori]\n"); }
+        $out .= $key;
+        $str = $';
+    }
+    $out .= $str;
+    return $out;
+}
+sub run_command
+{
+    my ($self,$outfile,$cmd) = @_;
+    $self->cmd($cmd,verbose=>1);
+    $self->cmd("touch $outfile");
+}
+
 
 #   sub runtime_stats
 #   {
@@ -238,139 +322,140 @@ sub index_part
     rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
 }
 
-sub parse_region
-{
-    my ($self,$region) = @_;
-    if ( $region=~/^([^:]+):(\d+)-(\d+)$/ ) { return ($1,$2,$3); }
-    elsif ( $region=~/^([^:]+):(\d+)$/ ) { return ($1,$2,undef); }
-    elsif ( $region=~/^([^:]+)$/ ) { return ($1,undef,undef); }
-    else { $self->throw("Could not parse the region: $region\n"); }
-}
-
-sub ith_column
-{
-    # $icol is 1-based
-    my ($self,$line,$icol) = @_;
-    if ( $icol<=0 ) { $self->throw("Expected \$icol > 0, got $icol\n"); }
-    my $s = 0;
-    my $e = -1;
-    my $i = 0;
-    while ($i<$icol)
-    {
-        $s = $e + 1;
-        $e = index($line,"\t",$s);
-        $i++;
-        if ( $e==-1 ) { last; }
-    }
-    if ( $e==-1 ) 
-    { 
-        if ( $i<$icol ) { $self->throw("Too few columns on the line, asked $icol: $line"); }
-        $e = length($line) - 1; 
-    }
-    return substr($line,$s,$e-$s);
-}
-
-sub base_name
-{
-    my ($name) = @_;
-    if ( $name=~m{^.+/([^/]+)$} ) { $name = $1; }
-    return $name;
-}
-
-sub run_cmd
-{
-    my ($self,$outfile,$input,$chunk) = @_;
-
-    my $region = "$$chunk{chr}:$$chunk{beg}-$$chunk{end}";
-    my $cmd = $$self{cmd};
-    $cmd =~ s/{REGION}/$region/g;
-
-    if ( defined $input )
-    {
-        if ( ref($input) eq 'ARRAY' )   # todo: this should never happen in the new code
-        {
-            my $inp   = join(' ',@$input);
-            $cmd =~ s/{INPUT}/$inp/g;
-        }
-        elsif ( $cmd =~ /{INPUT}/ )
-        {
-            $cmd =~ s/{INPUT}/$input/g;
-        }
-        else
-        {
-            $cmd = "tabix -h $input $region | $cmd";
-        }
-        if ( $cmd =~ /{BNAME}/ && ref($input) ne 'ARRAY' )
-        {
-            my $bname = base_name($input);
-            $cmd =~ s/{BNAME}/$bname/g;
-        }
-    }
-    if ( $cmd =~ /{CHR}/ ) { $cmd =~ s/{CHR}/$$chunk{chr}/; }
-    if ( $cmd =~ /{BEG}/ ) { $cmd =~ s/{BEG}/$$chunk{beg}/; }
-    if ( $cmd =~ /{END}/ ) { $cmd =~ s/{END}/$$chunk{end}/; }
-    if ( $cmd =~ /{OUTPUT}/ ) { $cmd =~ s/{OUTPUT}/$outfile.part/; }
-    else { $cmd .= " | bgzip -c > $outfile.part"; }
-
-    $self->cmd($cmd);
-
-    if ( $$self{fix_overlaps} )
-    {
-        my ($chr,$from,$to) = $self->parse_region($region);
-        open(my $in,"zcat $outfile.part |") or $self->throw("zcat $outfile.part: $!");
-        open(my $out,"| bgzip -c > $outfile.part2") or $self->throw("bgzip -c > $outfile.part2: $!");
-        while (my $line=<$in>)
-        {
-            if ( substr($line,0,1) ne '#' ) 
-            {
-                my $pos = $self->ith_column($line, $$self{fix_overlaps});
-                if ( $pos < $from ) { next; }
-                if ( defined $to && $pos > $to ) { next; }
-            }
-            print $out $line;
-        }
-        close($out) or $self->throw("close bgzip -c > $outfile.part2");
-        close($in) or $self->throw("close zcat $outfile.part");
-        rename("$outfile.part2","$outfile.part") or $self->throw("rename $outfile.part2 $outfile.part: $!");
-    }
-    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
-}
+#   sub parse_region
+#   {
+#       my ($self,$region) = @_;
+#       if ( $region=~/^([^:]+):(\d+)-(\d+)$/ ) { return ($1,$2,$3); }
+#       elsif ( $region=~/^([^:]+):(\d+)$/ ) { return ($1,$2,undef); }
+#       elsif ( $region=~/^([^:]+)$/ ) { return ($1,undef,undef); }
+#       else { $self->throw("Could not parse the region: $region\n"); }
+#   }
+#   
+#   sub ith_column
+#   {
+#       # $icol is 1-based
+#       my ($self,$line,$icol) = @_;
+#       if ( $icol<=0 ) { $self->throw("Expected \$icol > 0, got $icol\n"); }
+#       my $s = 0;
+#       my $e = -1;
+#       my $i = 0;
+#       while ($i<$icol)
+#       {
+#           $s = $e + 1;
+#           $e = index($line,"\t",$s);
+#           $i++;
+#           if ( $e==-1 ) { last; }
+#       }
+#       if ( $e==-1 ) 
+#       { 
+#           if ( $i<$icol ) { $self->throw("Too few columns on the line, asked $icol: $line"); }
+#           $e = length($line) - 1; 
+#       }
+#       return substr($line,$s,$e-$s);
+#   }
+#   
+#   sub base_name
+#   {
+#       my ($name) = @_;
+#       if ( $name=~m{^.+/([^/]+)$} ) { $name = $1; }
+#       return $name;
+#   }
+#   
+#   sub run_cmd
+#   {
+#       my ($self,$outfile,$input,$chunk) = @_;
+#   
+#       my $region = "$$chunk{chr}:$$chunk{beg}-$$chunk{end}";
+#       my $cmd = $$self{cmd};
+#       $cmd =~ s/{REGION}/$region/g;
+#   
+#       if ( defined $input )
+#       {
+#           if ( ref($input) eq 'ARRAY' )   # todo: this should never happen in the new code
+#           {
+#               my $inp   = join(' ',@$input);
+#               $cmd =~ s/{INPUT}/$inp/g;
+#           }
+#           elsif ( $cmd =~ /{INPUT}/ )
+#           {
+#               $cmd =~ s/{INPUT}/$input/g;
+#           }
+#           else
+#           {
+#               $cmd = "tabix -h $input $region | $cmd";
+#           }
+#           if ( $cmd =~ /{BNAME}/ && ref($input) ne 'ARRAY' )
+#           {
+#               my $bname = base_name($input);
+#               $cmd =~ s/{BNAME}/$bname/g;
+#           }
+#       }
+#       if ( $cmd =~ /{CHR}/ ) { $cmd =~ s/{CHR}/$$chunk{chr}/; }
+#       if ( $cmd =~ /{BEG}/ ) { $cmd =~ s/{BEG}/$$chunk{beg}/; }
+#       if ( $cmd =~ /{END}/ ) { $cmd =~ s/{END}/$$chunk{end}/; }
+#       if ( $cmd =~ /{OUTPUT}/ ) { $cmd =~ s/{OUTPUT}/$outfile.part/; }
+#       else { $cmd .= " | bgzip -c > $outfile.part"; }
+#   
+#       $self->cmd($cmd);
+#   
+#       if ( $$self{fix_overlaps} )
+#       {
+#           my ($chr,$from,$to) = $self->parse_region($region);
+#           open(my $in,"zcat $outfile.part |") or $self->throw("zcat $outfile.part: $!");
+#           open(my $out,"| bgzip -c > $outfile.part2") or $self->throw("bgzip -c > $outfile.part2: $!");
+#           while (my $line=<$in>)
+#           {
+#               if ( substr($line,0,1) ne '#' ) 
+#               {
+#                   my $pos = $self->ith_column($line, $$self{fix_overlaps});
+#                   if ( $pos < $from ) { next; }
+#                   if ( defined $to && $pos > $to ) { next; }
+#               }
+#               print $out $line;
+#           }
+#           close($out) or $self->throw("close bgzip -c > $outfile.part2");
+#           close($in) or $self->throw("close zcat $outfile.part");
+#           rename("$outfile.part2","$outfile.part") or $self->throw("rename $outfile.part2 $outfile.part: $!");
+#       }
+#       rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+#   }
 
 sub concat
 {
-    my ($self,$outfile,$outdir,$chunks) = @_;
+    my ($self,$outfile,$chunks) = @_;
     if ( $$self{vcf_concat} )
     {
-        $self->vcf_concat($outfile,$outdir,$chunks);
+        $self->vcf_concat($outfile,$chunks);
         return;
     }
 
-    # Generic concat
-    open(my $fh,"| bgzip -c > $outfile.part") or $self->throw("bgzip -c > $outfile.part: $!");
-    for my $chunk (@$chunks)
-    {
-        my $region = "$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
-        open(my $in,"gunzip -c $outdir/$$chunk{chr}/$region |") or $self->throw("gunzip -c $outdir/$$chunk{chr}/$region: $!");
-        while (my $line=<$in>) { print $fh $line; }
-        close($in) or $self->throw("close gunzip -c $outdir/$$chunk{chr}/$region");
-    }
-    close($fh) or $self->throw("close bgzip -c > $outfile.part");
-    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+    $self->throw("todo: non-vcf concat\n");
+
+    #   # Generic concat
+    #   open(my $fh,"| bgzip -c > $outfile.part") or $self->throw("bgzip -c > $outfile.part: $!");
+    #   for my $chunk (@$chunks)
+    #   {
+    #       my $region = "$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
+    #       open(my $in,"gunzip -c $outdir/$$chunk{chr}/$region |") or $self->throw("gunzip -c $outdir/$$chunk{chr}/$region: $!");
+    #       while (my $line=<$in>) { print $fh $line; }
+    #       close($in) or $self->throw("close gunzip -c $outdir/$$chunk{chr}/$region");
+    #   }
+    #   close($fh) or $self->throw("close bgzip -c > $outfile.part");
+    #   rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
 sub vcf_concat
 {
-    my ($self,$outfile,$outdir,$chunks) = @_;
-    my $list = "$outdir/concat.list";
+    my ($self,$outfile,$chunks) = @_;
+    my $list = "$outfile.list";
     open(my $fh,'>',"$list") or $self->throw("$list: $!");
     for my $chunk (@$chunks)
     {
-        my $region = "$$chunk{chr}-$$chunk{beg}-$$chunk{end}";
-        print $fh "$outdir/$$chunk{chr}/$region\n";
+        print $fh "$$chunk{out}\n";
     }
     close($fh) or $self->throw("close $list");
 
-    $self->cmd("$$self{bcftools} concat -f $list -Ob -o $outfile.part");
+    $self->cmd("$$self{bcftools} concat -n -f $list -Ob -o $outfile.part");
     $self->index_part($outfile);
 }
 

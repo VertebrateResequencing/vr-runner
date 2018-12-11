@@ -191,6 +191,8 @@ sub list_chrs
             <ngts>
                 Chunk the files by the number of genotypes, files with many samples
                 will be split into more parts than files with few samples
+            <nsites>
+                Chunk the files by the number of sites
             <regions>
                 List of regions to limit the chunking to (currently only whole 
                 chromosomes)
@@ -207,7 +209,7 @@ sub list
     if ( !exists($args{bcftools}) ) { $args{bcftools} = 'bcftools'; }
     if ( !exists($args{size_bp}) ) { $args{size_bp} = 10e6; }
 
-    my $method = exists($args{ngts}) ? 'Runner::Chunk::_chunk_vcf_by_ngts' : 'Runner::Chunk::_chunk_vcf';
+    my $method = (exists($args{ngts}) or exists($args{nsites})) ? 'Runner::Chunk::_chunk_vcf_by_ngts' : 'Runner::Chunk::_chunk_vcf';
 
     my $done = 1;
     for my $file (@{$args{files}})
@@ -267,9 +269,14 @@ sub _chunk_vcf_by_ngts
 {
     my ($self,$outfile,$chr,%args) = @_;
 
-    my @smpl = `$args{bcftools} query -l $args{vcf}`;
-    if ( $? ) { confess("Error: $args{bcftools} query -l $args{vcf}: $!"); }
-    my $max_nrec = scalar @smpl ? $args{ngts} / scalar @smpl : 1;
+    my $max_nrec;
+    if ( exists($args{nsites}) ) { $max_nrec = $args{nsites}; }
+    else
+    {
+        my @smpl = `$args{bcftools} query -l $args{vcf}`;
+        if ( $? ) { confess("Error: $args{bcftools} query -l $args{vcf}: $!"); }
+        $max_nrec = scalar @smpl ? $args{ngts} / scalar @smpl : 1;
+    }
     if ( $max_nrec < 1 ) { $max_nrec = 1; }
 
     my ($beg, $end);
@@ -280,8 +287,8 @@ sub _chunk_vcf_by_ngts
     while (my $line=<$fh>)
     {
         if ( !defined $beg ) { $beg = $line; }
-        if ( ++$nrec < $max_nrec ) { next; }
         $end = $line;
+        if ( ++$nrec < $max_nrec ) { next; }
         chomp($beg);
         chomp($end);
         push @${chunks}, { chr=>$chr, beg=>$beg, end=>$end, nrec=>$nrec };
@@ -289,6 +296,11 @@ sub _chunk_vcf_by_ngts
         $beg  = undef;
     }
     close($fh) or confess("close failed: $cmd");
+
+    if ( $nrec )
+    {
+        push @${chunks}, { chr=>$chr, beg=>$beg, end=>$end, nrec=>$nrec };
+    }
 
     if ( @$chunks > 1 && $$chunks[-1]{nrec} < 0.2*$max_nrec )
     {
