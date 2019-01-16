@@ -479,6 +479,10 @@ sub set_limits
 {
     my ($self,%args) = @_;
     $$self{_farm_options} = { %{$$self{_farm_options}}, %args };
+    for my $key (keys %{$$self{_farm_options}})
+    {
+        if ( !defined($$self{_farm_options}{$key}) ) { delete($$self{_farm_options}{$key}); }
+    }
     if ( exists($$self{_revived_file}) )
     {
         # This is to allow user modules to request resources directly. For example,
@@ -546,9 +550,9 @@ sub inc_limits
     }
     for my $key (keys %args)
     {
-        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or !defined($args{$key}) or $$dst{$key}<$args{$key} ) 
+        if ( !defined($args{$key}) ) { next; }
+        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
         { 
-            # $self->debugln("changing limit, $key set to ".(defined $args{$key} ? $args{$key} : 'undef'));
             $$dst{$key} = $args{$key};
         }
     }
