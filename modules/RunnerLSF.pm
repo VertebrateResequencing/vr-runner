@@ -35,6 +35,9 @@ sub new
     $$self{default_limits} = { runtime=>40, memory=>1_000, queue=>'normal' };
     $$self{queue_limits}   = { basement=>1e9, long=>72*60, normal=>12*60, small=>30 };
 
+    # Can be one of: kB,MB,GB or "ask" for `lsadmin showconf lim`
+    if ( !exists($$self{lsf_limits_unit}) ) { $$self{lsf_limits_unit} = 'MB'; }
+
     $self->_set_lsf_limits_unit();
     $self->_init_zombies();
 
@@ -323,8 +326,7 @@ sub _parse_bjobs_l
             if ( $job_info=~/,\s*Checkpoint directory <([^>]+)>/ ) { $$job{chkpnt_dir} = $1; }
             if ( $job_info=~/\srusage\[mem=(\d+)/ ) 
             { 
-                $$job{mem_usage} = $1; 
-                if ( $$self{lsf_limits_unit} eq 'kB' ) { $$job{mem_usage} /= 1000.0; }
+                $$job{mem_usage} = $1 / $$self{lsf_limits_scale};   # convert to MB
             }
         }
         # elsif ( $lines[$i]=~/^\w+\s+\w+\s+\d+ \d+:\d+:\d+:\s*Completed <exit>; TERM_CHKPNT/ )
@@ -533,27 +535,55 @@ sub past_limits
     return %out;
 }
 
+sub _get_lsf_limits_unit
+{
+    my ($self) = @_;
+    my @units = grep { /LSF_UNIT_FOR_LIMITS/ } `lsadmin showconf lim 2>/dev/null`;
+    if ( $? or !@units ) { return undef; }
+    my $units;
+    if ( $units[0]=~/\s+MB$/i ) { $units = 'MB'; }
+    elsif ( $units[0]=~/\s+kB$/i ) { $units = 'kB'; }
+    elsif ( $units[0]=~/\s+GB$/i ) { $units = 'GB'; }
+    else { $self->throw("Could not parse output of `lsadmin showconf lim`: $units[0]"); }
+    return $units;
+}
 sub _set_lsf_limits_unit
 {
     my ($self) = @_;
-    if ( exists($$self{lsf_limits_unit}) ) { return; }
-
-    for (my $i=2; $i<15; $i++)
+    my $units;
+    if ( !exists($$self{lsf_limits_unit}) or lc($$self{lsf_limits_unit}) eq 'ask' )
     {
-        my @units = grep { /LSF_UNIT_FOR_LIMITS/ } `lsadmin showconf lim 2>/dev/null`;
-        if ( $? ) 
-        { 
-            # lasdmin may be temporarily unavailable and return confusing errors:
-            # "Bad host name" or "ls_gethostinfo(): A socket operation has failed: Address already in use"
-            print STDERR "lsadmin failed, trying again in $i sec...\n";
-            sleep $i; 
-            next; 
+        my $i;
+        for ($i=2; $i<15; $i++)
+        {
+            $units = $self->_get_lsf_limits_unit();
+            if ( !defined $units ) 
+            { 
+                # lasdmin may be temporarily unavailable and return confusing errors:
+                # "Bad host name" or "ls_gethostinfo(): A socket operation has failed: Address already in use"
+                print STDERR "lsadmin failed, trying again in $i sec...\n";
+                sleep $i; 
+                next; 
+            }
+            last;
         }
-        if ( @units && $units[0]=~/\s+MB$/ ) { $$self{lsf_limits_unit} = 'MB'; }
-        else { $$self{lsf_limits_unit} = 'kB'; }
-        return $$self{lsf_limits_unit};
+        if ( $i==15 ) { $self->throw("lsadmin showconf lim failed repeatedly"); }
     }
-    confess("lsadmin showconf lim failed repeatedly");
+    else
+    {
+        $units = $self->_get_lsf_limits_unit();
+        if ( !defined $units )
+        {
+            $units = $$self{lsf_limits_unit};
+            print STDERR "Note: `lsadmin showconf lim` failed, assuming the default unit is $units\n";
+        }
+    }
+    my $scale = 1;
+    if ( lc($units) eq 'mb' ) { $scale = 1; }
+    elsif ( lc($units) eq 'kb') { $scale = 1e3; }
+    elsif ( lc($units) eq 'gb' ) { $scale = 1e-3; }
+    else { error("Unknown unit: $units"); }
+    $$self{lsf_limits_scale} = $scale;      # for conversion to MB
 }
 
 sub _create_bsub_opts_string
@@ -563,7 +593,7 @@ sub _create_bsub_opts_string
     # Set bsub options. By default request 1GB of memory, the queues require mem to be set explicitly
     my $bsub_opts = '';
     my $mem    = $$self{limits}{memory} ? int($$self{limits}{memory}) : $$self{default_limits}{memory};
-    my $lmem   = $$self{lsf_limits_unit} eq 'kB' ? $mem*1000 : $mem;
+    my $lmem   = $$self{lsf_limits_scale} * $mem;
 
     my $runtime = $$self{limits}{runtime} ? $$self{limits}{runtime} : $$self{default_limits}{runtime};
     my $queue   = $self->_get_queue($runtime);
