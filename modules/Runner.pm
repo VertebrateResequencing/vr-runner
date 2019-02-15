@@ -852,7 +852,7 @@ sub _get_unfinished_jobs
             }
 
             # Exit the loop now if run with +maxjobs, this increases performance significantly with very many jobs (10k+)
-            if ( $$self{_maxjobs} && $$self{_maxjobs} < $$self{_jobs_db_unfinished} ) { last; }
+            if ( $$self{_maxjobs} && !$$self{_run_locally} && $$self{_maxjobs} < $$self{_jobs_db_unfinished} ) { last; }
         }
         if ( !@{$calls{$call}} ) { delete($calls{$call}); }
     }
