@@ -286,6 +286,7 @@ sub _chunk_vcf_by_ngts
     open(my $fh,"$cmd |") or confess("$cmd: $!");
     while (my $line=<$fh>)
     {
+        chomp($line);
         if ( !defined $beg ) { $beg = $line; }
         $end = $line;
         if ( ++$nrec < $max_nrec ) { next; }
@@ -392,7 +393,8 @@ sub _read_cache
         if ( $line=~/^#/ ) { next; }    # skip commented lines
         if ( $line=~/^\s*$/ ) { next; } # skip empty lines
         my @vals = split(/\s+/,$line);
-        chomp($vals[2]);
+        if ( @vals!=3 ) { confess("Corrupted cache file: $file"); }
+        chomp($vals[-1]);
         push @$chunks, { chr=>$vals[0], beg=>$vals[1], end=>$vals[2] };
     }
     close($fh) or confess("close error: $file");
