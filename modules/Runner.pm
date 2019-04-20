@@ -672,7 +672,7 @@ sub _is_marked_as_finished
     my $is_done   = 0;
 
     # First time here, read the plain text "database" of finished files
-    if ( !exists($$self{_jobs_db}{$done_file}) && !$$self{_nocache} )
+    if ( !exists($$self{_jobs_db}{$wfile}) && !$$self{_nocache} )
     {
         if ( -e $wfile )
         {
@@ -684,11 +684,11 @@ sub _is_marked_as_finished
                 my $done = $1;
                 my $id   = $2;  
                 my $file = $3;
-                $$self{_jobs_db}{$file}{finished} = $done;
-                $$self{_jobs_db}{$file}{wfile}    = $wfile;
-                $$self{_jobs_db}{$file}{call}     = $call;
-                $$self{_jobs_db}{$file}{id}       = $id;
-                $$self{_jobs_db}{$file}{dfile}    = $file;
+                $$self{_jobs_db}{$wfile}{$file}{finished} = $done;
+                $$self{_jobs_db}{$wfile}{$file}{wfile}    = $wfile;
+                $$self{_jobs_db}{$wfile}{$file}{call}     = $call;
+                $$self{_jobs_db}{$wfile}{$file}{id}       = $id;
+                $$self{_jobs_db}{$wfile}{$file}{dfile}    = $file;
 
                 if ( !exists($$self{_max_ids}{$call}) or $$self{_max_ids}{$call}<$id ) { $$self{_max_ids}{$call} = $id; }
             }
@@ -698,27 +698,27 @@ sub _is_marked_as_finished
     }
 
     # No cache exists, init the job, set its ID and control file locations
-    if ( !exists($$self{_jobs_db}{$done_file}) )
+    if ( !exists($$self{_jobs_db}{$wfile}{$done_file}) )
     {
-        if ( !exists($$self{_jobs_db}{$done_file}{id}) ) { $$self{_jobs_db}{$done_file}{id} = ++$$self{_max_ids}{$call}; }
-        $$self{_jobs_db}{$done_file}{call}  = $call;
-        $$self{_jobs_db}{$done_file}{wfile} = $wfile;
-        $$self{_jobs_db}{$done_file}{dfile} = $done_file;
-        $$self{_jobs_db}{$done_file}{finished} = 0;
+        if ( !exists($$self{_jobs_db}{$wfile}{$done_file}{id}) ) { $$self{_jobs_db}{$wfile}{$done_file}{id} = ++$$self{_max_ids}{$call}; }
+        $$self{_jobs_db}{$wfile}{$done_file}{call}  = $call;
+        $$self{_jobs_db}{$wfile}{$done_file}{wfile} = $wfile;
+        $$self{_jobs_db}{$wfile}{$done_file}{dfile} = $done_file;
+        $$self{_jobs_db}{$wfile}{$done_file}{finished} = 0;
     }
-    my $sfile  = "$wfile.$$self{_jobs_db}{$done_file}{id}.s";
-    my $fsfile = "$wfile.$$self{_jobs_db}{$done_file}{id}.fs";
+    my $sfile  = "$wfile.$$self{_jobs_db}{$wfile}{$done_file}{id}.s";
+    my $fsfile = "$wfile.$$self{_jobs_db}{$wfile}{$done_file}{id}.fs";
 
     # If skip file exists and +retries >0, the skip file will be deleted
-    if ( $$self{_nretries}>0 && $$self{_jobs_db}{$done_file}{finished} eq 's' ) 
+    if ( $$self{_nretries}>0 && $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 's' ) 
     { 
-        $$self{_jobs_db}{$done_file}{finished} = 0; 
+        $$self{_jobs_db}{$wfile}{$done_file}{finished} = 0; 
         $is_dirty = 1;
     }
-    if ( $$self{_jobs_db}{$done_file}{finished} ) 
+    if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} ) 
     { 
-        if ( $$self{_jobs_db}{$done_file}{finished} eq 'f' ) { $self->debugln("Skipping the job upon request, a force skip file exists: $fsfile"); }
-        if ( $$self{_jobs_db}{$done_file}{finished} eq 's' ) { $self->debugln("Skipping the job, a skip file exists: $sfile"); }
+        if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 'f' ) { $self->debugln("Skipping the job upon request, a force skip file exists: $fsfile"); }
+        if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 's' ) { $self->debugln("Skipping the job, a skip file exists: $sfile"); }
         return 2;
     }
 
@@ -752,29 +752,27 @@ sub _is_marked_as_finished
         $is_dirty = 1;
     }
     if ( $is_done eq '0' ) { $$self{_jobs_db_unfinished}++; }
-    $$self{_jobs_db}{$done_file}{finished} = $is_done;
-    $$self{_jobs_db_dirty} += $is_dirty;
-    return $$self{_jobs_db}{$done_file}{finished};
+    $$self{_jobs_db}{$wfile}{$done_file}{finished} = $is_done;
+    $$self{_jobs_db_dirty}{$wfile} += $is_dirty;
+    return $$self{_jobs_db}{$wfile}{$done_file}{finished};
 }
 
 
 sub _mark_as_finished
 {
     my ($self) = @_;
-    if ( !$$self{_jobs_db_dirty} ) { return; }
 
-    my %wfiles = ();
-    for my $job (values %{$$self{_jobs_db}})
+    if ( !exists($$self{_jobs_db_dirty}) ) { return; }
+
+    for my $wfile (keys %{$$self{_jobs_db_dirty}})
     {
-        push @{$wfiles{$$job{wfile}}}, $job;
-    }
-    for my $wfile (keys %wfiles)
-    {
+        if ( !$$self{_jobs_db_dirty}{$wfile} ) { next; }
+
         $self->_mkdir($wfile);
         open(my $fh,'>',"$wfile.part") or $self->throw("$wfile.part: $!");
         my @clean_ids = ();
         my $all_done  = 1;
-        for my $job (sort {$$a{id}<=>$$b{id}} @{$wfiles{$wfile}})
+        for my $job (sort {$$a{id}<=>$$b{id}} values %{$$self{_jobs_db}{$wfile}})
         {
             print $fh "$$job{finished}\t$$job{id}\t$$job{dfile}\n"; 
             if ( $$job{finished} ) { push @clean_ids, $$job{id}; }
@@ -829,7 +827,8 @@ sub _get_unfinished_jobs
         for (my $i=0; $i<@{$calls{$call}}; $i++)
         {
             my $job = $calls{$call}[$i];
-            $$job{wait_file} = "$dir/$call.w";
+            my $wfile = "$dir/$call.w";
+            $$job{wait_file} = $wfile;
             my $ret;
             if ( ($ret=$self->_is_marked_as_finished($job)) )
             {
@@ -841,14 +840,14 @@ sub _get_unfinished_jobs
             }
             else
             {
-                my $id = $$self{_jobs_db}{$$job{done_file}}{id};
-                if ( exists($wfiles{$$job{wait_file}}{$id}) ) 
+                my $id = $$self{_jobs_db}{$wfile}{$$job{done_file}}{id};
+                if ( exists($wfiles{$wfile}{$id}) ) 
                 { 
-                    $self->throw("The target file name is not unique: $$job{done_file}\n",Dumper($wfiles{$$job{wait_file}}{$id}{args},$$job{args})); 
+                    $self->throw("The target file name is not unique: $$job{done_file}\n",Dumper($wfiles{$wfile}{$id}{args},$$job{args})); 
                 }
                 if ( $nprn_pend < 2 ) { $self->debugln("\tx  $$job{done_file} .. unfinished"); $nprn_pend++; }
                 elsif ( $nprn_pend < 3 ) { $self->debugln("\tx  ...etc..."); $nprn_pend++; }
-                $wfiles{$$job{wait_file}}{$id} = $job;
+                $wfiles{$wfile}{$id} = $job;
             }
 
             # Exit the loop now if run with +maxjobs, this increases performance significantly with very many jobs (10k+)
