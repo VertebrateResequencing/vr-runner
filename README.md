@@ -4,6 +4,7 @@ Runner pipelines
 ----------------
 The runner pipelines are usually named as `run-something`. This document uses
 `run-st-mpileup` as an example, but the usage is the same for all runners. 
+Check the `run-test-simple` example to learn how to write your own pipelines.
 
 For the impatient
 -----------------
