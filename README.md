@@ -1,4 +1,5 @@
 The vr-runner package provides a lightweight pipeline framework.
+Check these short motivation [slides](https://raw.githubusercontent.com/VertebrateResequencing/vr-runner/master/about-runners.pdf) with examples to see how it works.
 
 Runner pipelines
 ----------------
