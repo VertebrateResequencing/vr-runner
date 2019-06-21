@@ -134,6 +134,7 @@ sub parse_args
         if ( $arg eq '-c' or $arg eq '--command' ) { $$self{cmd}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
         if ( $arg eq '-i' or $arg eq '--input' ) { push @{$$self{input}}, shift(@ARGV); next; }
+        $self->throw();
     }
     if ( !@{$$self{input}} ) { $self->throw("Missing the -i option or the config key 'input')\n"); }
     if ( !defined $$self{outdir} ) { $self->throw("Missing the -o option or the config key 'outdir')\n"); }
