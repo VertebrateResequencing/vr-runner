@@ -40,6 +40,7 @@ sub new
             freebayes  => '] .$$self{freebayes}.  q[',
             fasta      => undef,
             bam        => undef,
+            bam_list   => undef,
 
             limits     => { runtime=>24*60, memory=>10_000 },
             do_clean   => 1,
@@ -51,6 +52,7 @@ sub new
         "Usage: run-freebayes\n" .
         "Options:\n" .
         "   -b, --bam <file>        \n" .
+        "   -B, --bam-list <file>   \n" .
         "   -f, --fasta <file>      \n" .
         "   -o, --outdir <dir>      \n" .
         "   -t, --targets <file>    \n" .
@@ -65,13 +67,14 @@ sub parse_args
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-b' or $arg eq '--bam' ) { $$self{bam}=shift(@ARGV); next; }
+        if ( $arg eq '-B' or $arg eq '--bam-list' ) { $$self{bam_list}=shift(@ARGV); next; }
         if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
         if ( $arg eq '-t' or $arg eq '--targets' ) { $$self{targets}=shift(@ARGV); next; }
         $self->throw();
     }
     if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
-    if ( !defined($$self{bam}) ) { $self->throw("Expected the -b option."); }
+    if ( !defined($$self{bam}) and !defined($$self{bam_list}) ) { $self->throw("Expected the -b or -B option."); }
     if ( !defined($$self{fasta}) ) { $self->throw("Expected the -f option."); }
 }
 
@@ -134,7 +137,7 @@ sub merge
     }
     close($fh) or $self->throw("close failed: $!");
 
-    $self->cmd("bcftools concat -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools sort -Ou | bcftools norm -f $$self{fasta} -Ob -o $outfile.part");
+    $self->cmd("bcftools concat -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools sort -Ou -T $outfile.tmp.XXXXXX | bcftools norm -f $$self{fasta} -Ob -o $outfile.part");
 
     $self->index_part($outfile);
 }
@@ -195,7 +198,11 @@ sub read_fai
 sub run_freebayes
 {
     my ($self,$outfile,$chunk) = @_;
-    my $cmd = "$$self{freebayes} --bam $$self{bam} --region $$chunk{chr}:$$chunk{beg}-$$chunk{end} -f $$self{fasta} | bcftools view -Ob -o $outfile.part";
+    my @bam = ();
+    if ( defined($$self{bam}) ) { push @bam,"-b $$self{bam}"; }
+    if ( defined($$self{bam_list}) ) { push @bam,"-L $$self{bam_list}"; }
+    my $bam = join(' ',@bam);
+    my $cmd = "$$self{freebayes} $bam --region $$chunk{chr}:$$chunk{beg}-$$chunk{end} -f $$self{fasta} | bcftools view -Ob -o $outfile.part";
     $self->cmd($cmd,verbose=>1);
     $self->index_part($outfile);
 }
