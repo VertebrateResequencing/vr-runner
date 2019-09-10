@@ -28,10 +28,11 @@ sub new
     $$self{call}           = 'bcftools call -vm';
     $$self{norm}           = 'bcftools norm';
     $$self{reheader}       = 'bcftools reheader';
+    $$self{merge}          = 'bcftools merge';
     $$self{index}          = 'bcftools index';
     $$self{vcfstats}       = 'bcftools stats -c both -s -';
     $$self{filter}         = 'bcftools filter -m+ -sLowQual -e"%QUAL<=10" -g3 -G10';
-    $$self{concat}         = 'bcftools concat';
+    $$self{concat}         = 'bcftools concat --naive';
     $$self{htsfile}        = 'htsfile';
     $$self{chunk_size}     = 1_000_000;
 	$$self{config_version} = '1427807557';
@@ -200,6 +201,30 @@ sub main
         }
     }
     $self->wait;
+
+
+    # Merge groups
+    if ( $$self{merge_groups} )
+    {
+        if ( $$self{merge_chroms} )
+        {
+            my @merge = ();
+            for my $group (keys %$groups) { push @merge, "$outdir/$group.bcf"; }
+            $self->spawn('merge_vcfs',"$outdir/merged/all.bcf",\@merge);
+            push @vcfs,@merge;
+        }
+        else
+        {
+            for my $chr (keys %chrs)
+            {
+                my @merge = ();
+                for my $group (keys %$groups) { push @merge, "$outdir/$group/$chr.bcf"; }
+                $self->spawn('merge_vcfs',"$outdir/merged/$chr.bcf",\@merge);
+                push @vcfs,@merge;
+            }
+        }
+        $self->wait;
+    }
 
     
     # Run summary stats
@@ -657,6 +682,20 @@ sub merge_chunks
     $cmd .= " -Ob -o $outfile.part";
     $self->cmd($cmd);
 
+    $self->index_part($outfile);
+}
+
+sub merge_vcfs
+{
+    my ($self,$outfile,$files) = @_;
+    open(my $fh,'>',"$outfile.list") or $self->throw("$outfile.list: $!");
+    for my $file (@$files)
+    {
+        print $fh "$file\n";
+    }
+    close($fh) or $self->throw("close failed: $outfile.list");
+
+    $self->cmd("$$self{merge} -l $outfile.list -Ob -o $outfile.part");
     $self->index_part($outfile);
 }
 
