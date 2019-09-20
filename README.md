@@ -13,6 +13,10 @@ The minimum commands sufficient to install and run the pipelines is:
 
     # Get the code
     git clone git://github.com/VertebrateResequencing/vr-runner.git
+    
+    # Set the environment variables to make the code visible
+    export PATH="/path/to/vr-runner/scripts:$PATH"
+    export PERL5LIB="/path/to/vr-runner/modules:$PERL5LIB"
 
     # Create a config file, edit, and run
     run-bt-mpileup +sampleconf > my.conf
