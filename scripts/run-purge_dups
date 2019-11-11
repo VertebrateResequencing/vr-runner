@@ -1,0 +1,301 @@
+#!/usr/bin/env perl
+#
+# Author: sam68@cam.ac.uk
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+use File::Basename;
+use POSIX;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{minimap2} = '/software/vertres/bin-external/minimap2';
+    $$self{purge_dups} = '/software/vertres/bin-external/purge_dups/src';
+    $$self{bgzip} = 'bgzip';
+    $$self{limits} = { memory=>3_500 };
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+    ]."\n";
+
+    $$self{usage} .=
+        "About: Remove duplicted sequence from an assembly using purge_dups\n" .
+        "Usage: run-purge_dups\n" .
+        "Options:\n" .
+        "   -a, --asm <file>         primary assembly\n" .
+        "   -h, --htigs <file>       haplotig assembly (optional)\n" .
+        "   -f, --fofn <file>        path to file listing PacBio BAM or fasta files\n" .
+        "   -o, --outdir <dir>       output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-f' or $arg eq '--fofn' ) { $$self{fofn}=shift(@ARGV); next; }
+        if ( $arg eq '-a' or $arg eq '--asm' ) { $$self{asm}=shift(@ARGV); next; }
+        if ( $arg eq '-h' or $arg eq '--htigs' ) { $$self{htigs}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-?' or $arg eq '--help' ) { $self->throw(); }
+        $self->throw("Unknown argument: $arg\n");
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{asm}) ) { $self->throw("Expected the -a option."); }
+    if ( !defined($$self{fofn}) ) { $self->throw("Expected the -f option."); }
+}
+
+# #Step 1. Run minimap2 to align pacbio data and generate paf files, then calculate read depth histogram and base-level read depth. Commands are as follows:
+# for i in $pb_list
+# do
+#     minimap2 -xmap-pb $asm $i > $i.paf
+# done
+# src/pbcstat *.paf (produces PB.base.cov and PB.stat files)
+# src/calcuts PB.stat > cutoffs
+
+# #Step 1. Split an assembly and do a self-self alignment. Commands are following:
+# src/split_fa $asm > $asm.split
+# minimap2 -xasm5 -DP $asm.split $asm.split > $asm.split.self.paf
+
+# #Step 2. Purge haplotigs and overlaps with the following command.
+# src/purge_dups -2 -T cutoffs -c PB.base.cov $asm.split.self.paf > dups.bed
+
+# #Step 3. Get primary and haplotig sequences from draft assembly.
+# src/get_seqs dups.bed $asm > purged.fa 2> hap.fa
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+    $self->save_config('purge');
+
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
+    my $files = $self->read_list($$self{fofn});
+
+    $self->set_limits(memory => 100000, time => 1200, cpus => 16);
+    foreach my $file (@$files)
+    {
+        my $base = basename($file);
+        $base =~ s/\.(cr|b)am$//;
+        $base =~ s/\.f(ast)?[aq](\.gz)?$//;
+        $self->spawn('minimap2',qq[$$self{outdir}/coverage/$base.paf.gz],$file,$$self{asm});
+    }
+    $self->spawn('split_aln',qq[$$self{outdir}/split_aln/self_aln.paf.gz],$$self{asm});
+    $self->wait();
+
+    $self->set_limits(memory => 30000, time => 60, cpus => undef);
+    $self->spawn('coverage',qq[$$self{outdir}/coverage/cutoffs],$$self{asm});
+    $self->wait();
+
+    $self->set_limits(memory => 120000, time => 60, cpus => undef);
+    $self->spawn('purge_dups',qq[$$self{outdir}/purge_dups/dups.bed.gz],qq[$$self{outdir}/split_aln/self_aln.paf.gz],qq[$$self{outdir}/coverage/cutoffs],qq[$$self{outdir}/coverage/PB.base.cov]);
+    $self->wait();
+
+    $self->spawn('get_seqs',qq[$$self{outdir}/seqs/purged.fa.gz],$$self{asm},qq[$$self{outdir}/purge_dups/dups.bed.gz]);
+    $self->wait();
+
+    if (exists $$self{htigs})
+    {
+        # concat original htigs and additional htigs
+        my $htigs = qq[$$self{outdir}/seqs/htigs.fa.gz];
+        $self->spawn('concat_htigs',$htigs,$$self{htigs},qq[$$self{outdir}/seqs/purged.htigs.fa.gz]);
+        $self->wait();
+
+        $self->set_limits(memory => 100000, time => 1200, cpus => 16);
+        foreach my $file (@$files)
+        {
+            my $base = basename($file);
+            $base =~ s/\.(cr|b)am$//;
+            $base =~ s/\.f(ast)?[aq](\.gz)?$//;
+            $self->spawn('minimap2',qq[$$self{outdir}/coverage.htigs/$base.paf.gz],$file,$htigs);
+        }
+        $self->spawn('split_aln',qq[$$self{outdir}/split_aln.htigs/self_aln.paf.gz],$htigs);
+        $self->wait();
+
+        $self->set_limits(memory => 30000, time => 60, cpus => undef);
+        $self->spawn('coverage',qq[$$self{outdir}/coverage.htigs/cutoffs],$htigs);
+        $self->wait();
+
+        $self->set_limits(memory => 120000, time => 60, cpus => undef);
+        $self->spawn('purge_dups',qq[$$self{outdir}/purge_dups.htigs/dups.bed.gz],qq[$$self{outdir}/split_aln.htigs/self_aln.paf.gz],qq[$$self{outdir}/coverage.htigs/cutoffs],qq[$$self{outdir}/coverage.htigs/PB.base.cov]);
+        $self->wait();
+
+        $self->spawn('get_seqs',qq[$$self{outdir}/seqs.htigs/purged.fa.gz],$htigs,qq[$$self{outdir}/purge_dups.htigs/dups.bed.gz]);
+        $self->wait();
+    }
+    $self->cmd(qq[cp $$self{outdir}/seqs/purged.fa.gz $$self{outdir}/purged.fa.gz]);
+    $self->cmd(qq[asmstats $$self{outdir}/purged.fa.gz > $$self{outdir}/purged.fa.gz.stats]);
+    if (exists $$self{htigs})
+    {
+        $self->cmd(qq[cp $$self{outdir}/seqs.htigs/purged.fa.gz $$self{outdir}/purged.htigs.fa.gz]);
+    }
+    else
+    {
+        $self->cmd(qq[cp $$self{outdir}/seqs/purged.htigs.fa.gz $$self{outdir}/purged.htigs.fa.gz]);
+    }
+    $self->cmd(qq[asmstats $$self{outdir}/purged.htigs.fa.gz > $$self{outdir}/purged.htigs.fa.gz.stats]);
+    $self->cmd(qq[cat $$self{outdir}/purged.fa.gz $$self{outdir}/purged.htigs.fa.gz > $$self{outdir}/purged.diploid.fa.gz]);
+
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub minimap2
+{
+    my ($self,$outfile,$file,$asm) = @_;
+    my $size = 0;
+    if (-s "$asm.stats") {
+        my $stats = $self->parse_asmstats("$asm.stats");
+        $size = $$stats{sum};
+    } else {
+        $size = `seqtk comp $asm | awk '{sum+=\$2}END{print sum}'`; chomp $size;
+    }
+    $self->throw("could not get size of fasta $asm") unless $size;
+    $size = ceil( $size / 1e9 );
+    my $idx_size = $size > 4 ? " -I${size}G" : '';
+    $self->cmd(qq[$$self{minimap2} -t16 -xmap-pb$idx_size $asm $file | $$self{bgzip} -c > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub split_aln
+{
+    my ($self,$outfile,$asm) = @_;
+    my $prefix = $outfile;
+    $prefix =~ s/\.paf(\.gz)?$//;
+    $self->cmd(qq[$$self{purge_dups}/split_fa $asm | $$self{bgzip} -c > $prefix.fa.gz]);
+    my $size = `seqtk comp $prefix.fa.gz | awk '{sum+=\$2}END{print sum}'`; chomp $size;
+    $self->throw("could not get size of fasta $asm") unless $size;
+    $size = ceil( $size / 1e9 );
+    my $idx_size = $size > 4 ? " -I${size}G" : '';
+    $self->cmd(qq[$$self{minimap2} -t16 -xasm5$idx_size -DP $prefix.fa.gz $prefix.fa.gz | $$self{bgzip} -c > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub coverage
+{
+    my ($self,$outfile,$asm) = @_;
+    my $outdir = dirname($outfile);
+    chdir($outdir);
+    $outfile = basename($outfile);
+    $self->cmd(qq[$$self{purge_dups}/pbcstat *.paf.gz]);
+    $self->cmd(qq[$$self{purge_dups}/calcuts PB.stat > $outfile.part]);
+    $self->cmd(qq[unset PYTHONPATH && python $$self{purge_dups}/../scripts/hist_plot.py -c $outfile.part PB.stat $outfile.png]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub purge_dups
+{
+    my ($self,$outfile,$paf,$cutoffs,$cov) = @_;
+    $self->cmd(qq[$$self{purge_dups}/purge_dups -2 -T $cutoffs -c $cov $paf | $$self{bgzip} -c > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub get_seqs
+{
+    my ($self,$outfile,$asm,$bed) = @_;
+    $outfile =~ s/\.fa\.gz?$//;
+    $self->cmd(qq[$$self{purge_dups}/get_seqs $bed $asm > $outfile.tmp 2> $outfile.htigs.tmp]);
+    $self->cmd(qq[cat $outfile.htigs.tmp | $$self{bgzip} -c > $outfile.htigs.fa.gz && rm $outfile.htigs.tmp]);
+    $self->cmd(qq[cat $outfile.tmp | $$self{bgzip} -c > $outfile.fa.gz.part && rm $outfile.tmp]);
+    rename("$outfile.fa.gz.part","$outfile.fa.gz") or $self->throw("rename $outfile.fa.gz.part $outfile.fa.gzs: $!");
+}
+
+sub concat_htigs
+{
+    my ($self,$outfile,$file1,$file2) = @_;
+    $self->cmd(qq[zcat $file1 $file2 | $$self{bgzip} -c > $outfile.part]);
+    $self->cmd(qq[asmstats $outfile.part > $outfile.stats]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub read_list
+{
+    my ($self, $file) = @_;
+    my @list;
+    open(my $fh, "<$file") or $self->throw("Could not open file $file: $!");
+    while (<$fh>)
+    {
+        chomp;
+        next if (/^#/);
+        push(@list, $_);
+    }
+    close($fh) or $self->throw("Could not close $file: $!");
+    return \@list;
+}
+
+# sum = 1094337346, n = 3099, ave = 353125.958696354, largest = 7658067, smallest = 6049
+# N50 = 1501115, L50 = 183
+# N60 = 1079386, L60 = 269
+# N70 = 704473, L70 = 392
+# N80 = 319529, L80 = 629
+# N90 = 133273, L90 = 1183
+# N100 = 6049, L100 = 3099
+sub parse_asmstats
+{
+    my ($self, $stats) = @_;
+    my %stats;
+    open(my $fh, "<$stats") or $self->throw("Could not open $stats: $!");
+    while (<$fh>)
+    {
+        chomp;
+        if (/^sum = (\d+), n = (\d+), ave = ([\d\.]+), largest = (\d+), smallest = (\d+)$/)
+        {
+            $stats{sum} = $1;
+            $stats{n} = $2;
+            $stats{ave} = $3;
+            $stats{largest} = $4;
+            $stats{smallest} = $5;
+        }
+        elsif (/^N(\d+) = (\d+), L(\d+) = (\d+)$/)
+        {
+            my $nx = "N$1";
+            my $lx = "L$1";
+            $stats{$nx} = $2;
+            $stats{$lx} = $4;
+        }
+    }
+    close($fh) or $self->throw("Could not close $stats: $!");
+    return \%stats;
+}
+
+sub save_config
+{
+    my ($self,$name) = @_;
+    my $src = exists $$self{_config} ? $$self{_config} : '';
+    my $dst = "$$self{outdir}/$name.conf";
+    if ( -e $dst && $src && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    # if ( -e $dst && !$src) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst") if $src;
+}
