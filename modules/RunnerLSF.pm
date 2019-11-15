@@ -255,14 +255,25 @@ sub init_jobs
 
 sub _parse_bjobs_l
 {
-    my ($self) = @_;
+    my ($self,$debug_lsf_output) = @_;
 
     my @lines;
-    for (my $i=0; $i<3; $i++)
+    if ( !defined $debug_lsf_output )
     {
-        @lines = `bjobs -l 2>/dev/null`;
-        if ( $? ) { sleep 5; next; }
-        if ( !scalar @lines ) { return undef; }
+        for (my $i=0; $i<3; $i++)
+        {
+            @lines = `bjobs -l 2>/dev/null`;
+            if ( $? ) { sleep 5; next; }
+            if ( !scalar @lines ) { return undef; }
+        }
+    }
+    else
+    {
+        # If LSF output could not be parsed, debug by running
+        #
+        #   perl -e 'use RunnerLSF; $x=RunnerLSF->new; $x->_parse_bjobs_l(qq[debug-lsf-output.txt])'
+        #
+        @lines = `cat $debug_lsf_output`;
     }
 
     my %months = qw(Jan 1 Feb 2 Mar 3 Apr 4 May 5 Jun 6 Jul 7 Aug 8 Sep 9 Oct 10 Nov 11 Dec 12);
@@ -294,7 +305,7 @@ sub _parse_bjobs_l
             chomp($job_info);
             $i++; 
 
-            while ( $i<@lines && $lines[$i]=~/^\s{21}?(.*)$/ )
+            while ( $i<@lines && $lines[$i]=~/^\s{21}(.*)$/ )
             {
                 $job_info .= $1;
                 chomp($job_info);
@@ -317,7 +328,7 @@ sub _parse_bjobs_l
             my $job_info = $lines[$i];
             chomp($job_info);
 
-            while ( ($i+1)<@lines && $lines[$i+1]=~/^\s{21}?(.*)$/ )
+            while ( ($i+1)<@lines && $lines[$i+1]=~/^\s{21}(.*)$/ )
             {
                 $i++;
                 $job_info .= $1;
@@ -336,6 +347,7 @@ sub _parse_bjobs_l
 
         # Tue Mar 19 13:00:35: [685] started on <uk10k-4-1-07>...
         # Tue Dec 24 13:12:00: [1] started on 8 Hosts/Processors <8*vr-1-1-05>...
+        # Fri Nov 15 00:55:36: Started 1 Task(s) on Host(s) <bc-25-1-08>, Allocated 1 Slo
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started on/i ) 
         {
             $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
@@ -344,10 +356,15 @@ sub _parse_bjobs_l
         {
             $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
         }
+        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started \d+ task/i ) 
+        {
+            $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
+        }
+
         # Tue Mar 19 13:58:23: Resource usage collected...
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ ) 
         {
-            if ( !exists($$job{started}) ) { confess("No wall time for job $$job{lsf_id}??", @lines); }
+            if ( !exists($$job{started}) ) { confess("Could not parse the `bjobs -l` output for the job $$job{lsf_id}\nThe current line:\n\t$lines[$i]\nThe complete output:\n", @lines); }
             $$job{wall_time} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch - $$job{started};
             if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $$job{wall_time} ) { $$job{cpu_time} = $$job{wall_time}; }
         }
