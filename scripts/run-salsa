@@ -1,0 +1,356 @@
+#!/usr/bin/env perl
+#
+# Author: sm15@sanger.ac.uk
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+use File::Basename;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{verbose} = 1;
+    $$self{samtools} = '/software/vertres/bin-external/samtools';
+    $$self{bwa}      = '/software/vertres/bin-external/bwa';
+    $$self{bamToBed} = '/software/vertres/bin-external/bedtools-2.25.0/bin/bamToBed';
+    $$self{salsa}    = '/software/vertres/bin-external/SALSA';
+    $$self{java}     = '/software/vertres/bin-external/java8';
+    $$self{picard}   = '/software/vertres/bin-external/picard-2.18.11.jar';
+    $$self{bammarkduplicates2} = '/software/vertres/bin-external/biobambam-current/bammarkduplicates2';
+    $$self{arima_mapping_pipeline} = '/software/vertres/bin-external/arima_mapping_pipeline';
+    $$self{break} = 0;
+    $$self{limits}   = { memory=>3_500 };
+    $$self{config_version} = '1427807557';
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update
+            # the version key in your config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+    ]."\n";
+
+    $$self{usage} .=
+        "About: Scaffold an assembly with SALSA and Hi-C data\n" .
+        "Usage: run-salsa\n" .
+        "Options:\n" .
+        "   -b, --break              allow breaking\n" .
+        "   -m, --motif <str>        restriction enzyme motif, e.g. GATC,GANTC for Arima\n" .
+        "   -f, --fofn <file>        path to file listing input uBAM or uCRAM files\n" .
+        "   -r, --ref-fa <file>      reference sequence in fasta format\n" .
+        "   -o, --outdir <dir>       output directory\n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--break' ) { $$self{break}=1; next; }
+        if ( $arg eq '-m' or $arg eq '--motif' ) { $$self{motif}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fofn' ) { $$self{fofn}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--ref-fa' ) { $$self{fa_ref}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-?' or $arg eq '-h' or $arg eq '--help' ) { $self->throw(); }
+        $self->throw("Unknown argument: $arg\n");
+    }
+    if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{fa_ref}) ) { $self->throw("Expected the -r option."); }
+    if ( !defined($$self{fofn}) ) { $self->throw("Expected the -f option."); }
+    if ( !defined($$self{motif}) ) { $self->throw("Expected the -m option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    `mkdir -p $$self{outdir}`;
+    $self->save_config('salsa');
+
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
+    # prepare the reference assembly
+    $self->set_limits(memory => 10240, time => 1200, cpus => 2);
+    $self->spawn('bwa_index', qq[$$self{outdir}/ref/.bwa_index.done]);
+    $self->wait();
+
+    my $files = $self->read_list($$self{fofn});
+
+    # single-end mapping with bwa mem followed by 5' filtering
+    $self->set_limits(memory => 30240, time => 1200, cpus => 16);
+    my $idx = 0;
+    foreach my $file (@$files)
+    {
+        if ($file =~ m/\.(cr|b)am$/)
+        {
+            my $base = basename($file);
+            $base =~ s/\.(cr|b)am$//;
+            $self->spawn('bwa_mem',qq[$$self{outdir}/$idx/$base.mem.filt.1.bam],$file,0x40); # single end mapping and filtering of READ1
+            $self->spawn('bwa_mem',qq[$$self{outdir}/$idx/$base.mem.filt.2.bam],$file,0x80); # single end mapping and filtering of READ2
+        }
+        elsif ($file =~ m/\.f(ast)?q(\.gz)?$/)
+        {
+            my ($r1,$r2) = split(/,/, $file);
+            $self->throw("") unless ($r1 && $r2);
+            my $base = basename($r1);
+            $base =~ s/[\.\_]R[12]\.f(ast)?q(\.gz)?$//;
+            $self->spawn('bwa_mem_fastq',qq[$$self{outdir}/$idx/$base.mem.filt.1.bam],$r1,0x40); # single end mapping and filtering of READ1
+            $self->spawn('bwa_mem_fastq',qq[$$self{outdir}/$idx/$base.mem.filt.2.bam],$r2,0x80); # single end mapping and filtering of READ2
+        }
+        $idx++;
+    }
+    $self->wait();
+
+    # combine read pairs, then sort
+    $self->set_limits(memory => 10240, time => 1200, cpus => 16);
+    my @merge_bams = ();
+    $idx = 0;
+    foreach my $file (@$files)
+    {
+        my $base = basename($file);
+        $base =~ s/\.(cr|b)am$//;
+        $self->spawn('combine',qq[$$self{outdir}/$idx/$base.mem.filt.paired.sort.bam],qq[$$self{outdir}/$idx/$base.mem.filt.1.bam],qq[$$self{outdir}/$idx/$base.mem.filt.2.bam]);
+        push @merge_bams, qq[$$self{outdir}/$idx/$base.mem.filt.paired.sort.bam];
+        $idx++;
+    }
+    $self->wait();
+
+    # merge
+    $self->set_limits(memory => 10240, time => 1200, cpus => 16);
+    $self->spawn('merge',qq[$$self{outdir}/merge.bam],@merge_bams);
+    $self->wait();
+
+    # gather bam stats
+    $self->set_limits(memory => 1000, time => 100, cpus => 4);
+    foreach my $bam (@merge_bams,qq[$$self{outdir}/merge.bam])
+    {
+        $self->spawn('bamstats',"$bam.stats",$bam);
+    }
+
+    # mark duplicates
+    # $self->set_limits(memory => 60240, time => 1200, cpus => 2);
+    # $self->spawn('mkdup',qq[$$self{outdir}/merge.mkdup.bam],qq[$$self{outdir}/merge.bam]);
+    $self->set_limits(memory => 60240, time => 1200, cpus => 16);
+    $self->spawn('mkdup2',qq[$$self{outdir}/merge.mkdup.bam],qq[$$self{outdir}/merge.bam]);
+    $self->wait();
+
+    # all stats
+    $self->set_limits(memory => 1000, time => 100, cpus => 4);
+    $self->spawn('bamstats',qq[$$self{outdir}/merge.mkdup.bam.stats],qq[$$self{outdir}/merge.mkdup.bam]);
+
+    # bam2bed
+    $self->set_limits(memory => 60240, time => 1200, cpus => 12);
+    $self->spawn('bam2bed',qq[$$self{outdir}/merge.mkdup.bed],qq[$$self{outdir}/merge.mkdup.bam]);
+    $self->wait();
+
+    # hic
+    $self->set_limits(memory => 60240, time => 1200, cpus => 12);
+    # $self->spawn('hic',qq[$$self{outdir}/merge.pre.hic],qq[$$self{outdir}/merge.mkdup.bed]);
+
+    # salsa
+    $self->set_limits(memory => 60240, time => 1200, cpus => 1);
+    $self->spawn('salsa',qq[$$self{outdir}/out.nobreak.salsa/.salsa.done],qq[$$self{outdir}/merge.mkdup.bam],qq[$$self{outdir}/merge.mkdup.bed],0); # salsa with no misassembly breaking
+    $self->spawn('salsa',qq[$$self{outdir}/out.break.salsa/.salsa.done],qq[$$self{outdir}/merge.mkdup.bam],qq[$$self{outdir}/merge.mkdup.bed],1) if $$self{break}; # salsa with misassembly breaking
+    $self->wait();
+
+    # post-hic
+    $self->set_limits(memory => 60240, time => 1200, cpus => 12);
+    $self->spawn('posthic',qq[$$self{outdir}/out.nobreak.salsa/salsa_scaffolds.hic]);
+    $self->spawn('posthic',qq[$$self{outdir}/out.break.salsa/salsa_scaffolds.hic]) if $$self{break};
+    $self->wait();
+
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub bwa_index
+{
+    my ($self,$outfile) = @_;
+
+    my $is_gzip = $$self{fa_ref} =~/\.gz$/i ? 1 : 0;
+    my $ref = dirname($outfile) . qq[/ref.fa];
+    if ( $is_gzip )
+    {
+        $self->cmd(qq[gunzip -c $$self{fa_ref} | sed 's/[:|]/_/g' > $ref]);
+    }
+    else
+    {
+        $self->cmd(qq[sed 's/[:|]/_/g' $$self{fa_ref} > $ref]);
+    }
+    $self->cmd(qq[$$self{samtools} faidx $ref]);
+    $self->cmd(qq[$$self{bwa} index $ref]);
+    $self->cmd(qq[touch $outfile]);
+}
+
+sub bwa_mem
+{
+    my ($self,$outfile,$ubam,$filter) = @_;
+    my @rg_lines = ();
+    my $fh;
+    open($fh, "$$self{samtools} view -H $ubam |") || die;
+    while (<$fh>) {
+        chomp;
+        if (/^\@RG\t/) {
+            s/\t/\\t/g;
+            push(@rg_lines, "-H'$_'");
+        }
+    }
+    close($fh);
+    $self->throw("No \@RG lines found in $ubam") unless @rg_lines;
+    my $ref = qq[$$self{outdir}/ref/ref.fa];
+    $self->cmd(qq[$$self{samtools} view -hf$filter $ubam | $$self{samtools} fastq - | $$self{bwa} mem -t12 -B8 @rg_lines $ref - | perl $$self{arima_mapping_pipeline}/filter_five_end.pl | $$self{samtools} view -\@4 -b - > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bwa_mem_fastq
+{
+    my ($self,$outfile,$fq) = @_;
+    my @rg_lines = ();
+    my $ref = qq[$$self{outdir}/ref/ref.fa];
+    $self->cmd(qq[$$self{bwa} mem -t12 -B8 @rg_lines $ref $fq | perl $$self{arima_mapping_pipeline}/filter_five_end.pl | $$self{samtools} view -\@4 -b - > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub combine
+{
+    my ($self,$outfile,$bam1,$bam2) = @_;
+    $self->cmd(qq[perl $$self{arima_mapping_pipeline}/two_read_bam_combiner.pl $bam1 $bam2 $$self{samtools} 10 | $$self{samtools}  sort -\@12 -T $outfile.sort.tmp -o $outfile.part -]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub merge
+{
+    my ($self,$outfile,@merge_bams) = @_;
+    $self->cmd(qq[$$self{samtools} merge -\@12 - @merge_bams | tee $outfile.part | $$self{samtools} index -c -\@4 - $outfile.csi]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub mkdup
+{
+    my ($self,$outfile,$bam) = @_;
+    my $outdir = dirname($outfile);
+    $self->cmd("$$self{java} -Xmx24000m -Xms24000m -server -XX:+UseSerialGC -jar $$self{picard} MarkDuplicates INPUT=$bam OUTPUT=$outfile.part METRICS_FILE=$outfile.metrics.txt TMP_DIR=$outdir/tmp ASSUME_SORTED=TRUE VALIDATION_STRINGENCY=LENIENT",java_err_file=>"$outfile.java");
+    $self->cmd("$$self{samtools} index -c $outfile.part");
+    rename("$outfile.part.csi","$outfile.csi") or $self->throw("rename $outfile.part.v $outfile.csi: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub mkdup2
+{
+    my ($self,$outfile,$bam) = @_;
+    my $outdir = dirname($outfile);
+    $self->cmd("$$self{bammarkduplicates2} I=$bam O=$outfile.part M=$outfile.metrics.txt tmpfile=$outdir/bammkdup2 markthreads=16");
+    $self->cmd("$$self{samtools} index -c $outfile.part");
+    rename("$outfile.part.csi","$outfile.csi") or $self->throw("rename $outfile.part.csi $outfile.csi: $!");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bam2bed
+{
+    my ($self,$outfile,$bam) = @_;
+    $self->cmd(qq[$$self{samtools} view -\@4 -u -F0x400 $bam | $$self{bamToBed} | sort -k4 --parallel=8 -S50G > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub hic
+{
+    my ($self,$outfile,$bed) = @_;
+    my $ref = qq[$$self{outdir}/ref/ref.fa];
+    $self->cmd(qq[cut -f1,2 $ref.fai > $ref.chrom.sizes]);
+    my ($base) = $bed =~ m/^(\S+)\.bed$/;
+    $self->cmd(qq[paste -d '\\t' - - < $bed | awk 'BEGIN {FS="\\t"; OFS="\\t"} {if (\$1 > \$7) {print substr(\$4,1,length(\$4)-2),\$12,\$7,\$8,"16",\$6,\$1,\$2,"8",\$11,\$5} else { print substr(\$4,1,length(\$4)-2),\$6,\$1,\$2,"8",\$12,\$7,\$8,"16",\$5,\$11} }' | tr '\\-+' '01'  | sort --parallel=8 -S10G -k3,3d -k7,7d > $base.pre.bed]);
+    $self->cmd(qq[java8 -Xms6g -Xmx6g -jar /nfs/team135/yy5/squash/juicer_tools.1.8.9_jcuda.0.8.jar pre $base.pre.bed $outfile.part $ref.chrom.sizes]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub posthic
+{
+    my ($self,$outfile) = @_;
+    my $outdir = dirname($outfile);
+    my $ref = qq[$outdir/scaffolds_FINAL.fasta];
+    $self->cmd(qq[cut -f1,2 $ref.fai > $ref.chrom.sizes]);
+    $self->cmd(qq[python $$self{salsa}/alignments2txt.py -b ${outdir}/alignment_iteration_1.bed  -a ${outdir}/scaffolds_FINAL.agp -l ${outdir}/scaffold_length_iteration_1 > ${outdir}/alignments.txt]);
+    $self->cmd(qq[awk '{if (\$2 > \$6) {print \$1"\\t"\$6"\\t"\$7"\\t"\$8"\\t"\$5"\\t"\$2"\\t"\$3"\\t"\$4} else {print}}'  ${outdir}/alignments.txt | sort -k2,2d -k6,6d -T $outdir --parallel=8 -S50G | awk 'NF'  > ${outdir}/alignments_sorted.txt]);
+    $self->cmd(qq[java8 -Xms6g -Xmx6g -jar /nfs/team135/yy5/squash/juicer_tools.1.8.9_jcuda.0.8.jar pre ${outdir}/alignments_sorted.txt $outfile.part $ref.chrom.sizes]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub bamstats
+{
+    my ($self,$outfile,$bam) = @_;
+    $self->cmd("$$self{samtools} stats -\@4 -F0xb00 --insert-size 100000000 $bam > $outfile.part");
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub salsa
+{
+    my ($self,$outfile,$bam,$bed,$break) = @_;
+    my $ref = qq[$$self{outdir}/ref/ref.fa];
+    my $motif = qq[-e $$self{motif}];
+    $motif .= $break ? ' -m yes' : ' -m no';
+    my $out = $break ? 'out.break.salsa' : 'out.nobreak.salsa';
+    $self->cmd(qq[python $$self{salsa}/run_pipeline.py -a $ref -l $ref.fai -b $bed $motif -i 5 -p yes -o $$self{outdir}/$out]);
+    $self->cmd(qq[$$self{samtools} faidx $$self{outdir}/$out/scaffolds_FINAL.fasta]);
+    $self->cmd(qq[asmstats $$self{outdir}/$out/scaffolds_FINAL.fasta > $$self{outdir}/$out/scaffolds_FINAL.fasta.stats]);
+    $self->cmd(qq[touch $outfile]);
+}
+
+sub read_list
+{
+    my ($self, $file) = @_;
+    my @list;
+    open(my $fh, "<$file") or $self->throw("Could not open file $file: $!");
+    while (<$fh>)
+    {
+        chomp;
+        next if (/^#/);
+        push(@list, $_);
+    }
+    close($fh) or $self->throw("Could not close $file: $!");
+    return \@list;
+}
+
+sub write_list
+{
+    my ($self, $file, $list) = @_;
+    open(my $fh, ">$file") or $self->throw("Could not open file $file: $!");
+    foreach my $item (@$list)
+    {
+        print $fh "$item\n";
+    }
+    close($fh) or $self->throw("Could not close $file: $!");
+}
+
+sub save_config
+{
+    my ($self,$name) = @_;
+    my $src = exists $$self{_config} ? $$self{_config} : '';
+    my $dst = "$$self{outdir}/$name.conf";
+    if ( -e $dst && $src && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    # if ( -e $dst && !$src) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst") if $src;
+}
+
