@@ -264,7 +264,7 @@ sub parse_asmstats
     while (<$fh>)
     {
         chomp;
-        if (/^sum = (\d+), n = (\d+), ave = ([\d\.]+), largest = (\d+), smallest = (\d+)$/)
+        if (/^sum = (\d+), n = (\d+), ave = ([\d\.]+), largest = (\d+), smallest = (\d+)$/ || /^SCAFFOLD\tsum = (\d+), n = (\d+), ave = ([\d\.]+), largest = (\d+), smallest = (\d+)$/)
         {
             $stats{sum} = $1;
             $stats{n} = $2;
@@ -272,7 +272,7 @@ sub parse_asmstats
             $stats{largest} = $4;
             $stats{smallest} = $5;
         }
-        elsif (/^N(\d+) = (\d+), L(\d+) = (\d+)$/)
+        elsif (/^N(\d+) = (\d+), L(\d+) = (\d+)$/ || /^SCAFFOLD\tN(\d+) = (\d+), L(\d+) = (\d+)$/)
         {
             my $nx = "N$1";
             my $lx = "L$1";
