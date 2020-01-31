@@ -823,7 +823,9 @@ sub _get_unfinished_jobs
             }
             $min_len = $j;
         }
-        my $dir = $self->_get_temp_dir(substr($list[0]{done_file},0,$min_len));
+        my $prefix = substr($list[0]{done_file},0,$min_len);
+        if ( $prefix eq '' ) { $prefix = $list[0]{done_file}}
+        my $dir = $self->_get_temp_dir($prefix);
         for (my $i=0; $i<@{$calls{$call}}; $i++)
         {
             my $job = $calls{$call}[$i];

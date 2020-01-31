@@ -89,8 +89,8 @@ sub new
     ]."\n";
 
     $$self{usage} .= 
-        "About: Align fastq files via bwa\n" .
-        "Usage: run-bwa\n" .
+        "About: Run basic stats on the list of alignments\n" .
+        "Usage: run-qc-bam\n" .
         "Options:\n" .
         "   -b, --bams-list <file>      File or directory with bam files\n" .
         "   -o, --outdir <dir>          Output directory\n" .
