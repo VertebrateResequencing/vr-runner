@@ -20,6 +20,8 @@ use base qw(Runner);
 use strict;
 use warnings;
 
+use POSIX;
+
 sub new
 {
     my ($class,@args) = @_;
@@ -27,15 +29,18 @@ sub new
 
     $$self{do_clean} = 1;
     $$self{verbose} = 1;
-    $$self{limits} = { memory => 8000, runtime=>24*60 };
-    $$self{arrow} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/arrow';
-    $$self{sawriter} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/sawriter';
-    $$self{blasr} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/blasr';
-    $$self{pbindex} = '/nfs/srpipe_data/smrtlink/smrtcmds/bin/pbindex';
-    $$self{samtools} = '/software/vertres/bin-external/samtools';
-    $$self{gzip} = '/software/vertres/bin-external/pigz';
-    $$self{blasr_options} = '--minPctIdentity 70.0 --minMatch 12 --bestn 10 --hitPolicy randombest --randomSeed 42 --nproc 16 --bam';
-    $$self{arrow_options} = '-j 8';
+    $$self{limits} = { memory => 36000, runtime=>24*60 };
+    $$self{pbenv} = 'unset PYTHONPATH && unset PYTHONUSERBASE && export PATH=/software/vertres/installs/miniconda3/bin:${PATH} && export SMRT_CHEMISTRY_BUNDLE_DIR=/software/vertres/installs/pacbio && source activate pb-assembly-0.0.8 && ';
+    $$self{gcpp} = "gcpp";
+    $$self{pbmm2} = "pbmm2";
+    $$self{minimap2} = "minimap2";
+    $$self{pbindex} = "pbindex";
+    $$self{pbbamify} = "pbbamify";
+    $$self{samtools} = "samtools";
+    $$self{bcftools} = "bcftools";
+    $$self{bgzip} = "bgzip";
+    $$self{minimap2_options} = '-t 30';
+    $$self{gcpp_options} = '-j 12';
     $$self{scaffold_grouping_size} = 200_000;
     $$self{config_version} = '1500540704';
     $$self{debug_chunks} = 0;
@@ -56,19 +61,6 @@ outdir => '/path/to/output/directory',
 # path to the assembly fasta polished
 assembly => '/path/to/assembly/fasta',
 
-# path to programs in the SMRTlink suite
-arrow => '] . $$self{arrow} . q[',
-sawriter => '] . $$self{sawriter} . q[',
-blasr => '] . $$self{blasr} . q[',
-pbindex => '] . $$self{pbindex} . q[',
-
-# program options. setting the number of processes higher
-# (--nproc for blasr and -j for arrow) will make individual jobs
-# run faster, at the cost of being more difficult to schedule
-# to the cluster
-blasr_options => '] . $$self{blasr_options} . q[',
-arrow_options => '] . $$self{arrow_options} . q[',
-
 # smaller scaffolds can be grouped together such that
 # their combined size is never more than scaffold_grouping_size
 scaffold_grouping_size => '] . $$self{scaffold_grouping_size} . q[',
@@ -77,7 +69,7 @@ scaffold_grouping_size => '] . $$self{scaffold_grouping_size} . q[',
 samtools  => '] . $$self{samtools} . q[',
 
 # path to gzip or pigz if you have it installed
-gzip  => '] . $$self{gzip} . q[',
+bgzip  => '] . $$self{bgzip} . q[',
 ] . "\n";
 
     $$self{usage} .=
@@ -106,6 +98,12 @@ sub parse_args
     if ( !exists($$self{fofn}) ) { $self->throw("Expected --fofn option."); }
 }
 
+sub cmd
+{
+    my ($self,$cmd,%arg) = @_;
+    $self->SUPER::cmd(qq[$$self{pbenv}$cmd],%arg);
+}
+
 sub main
 {
     my ($self) = @_;
@@ -119,21 +117,22 @@ sub main
     $self->wait;
     $$self{assembly} = "$$self{outdir}/assembly/$basename.fasta";
 
-    # index the assembly fasta - should make blasr faster
+    # index the assembly fasta
     $self->set_limits(%{$$self{limits}}, cpus => 4);
-    $self->spawn('sawriter',"$$self{assembly}.sa");
-    $self->spawn('faidx',"$$self{assembly}.fai");
+    my $mmidx = $$self{assembly};
+    $mmidx =~ s/fasta$/mmi/;
+    $self->spawn('mmidx',$mmidx);
     $self->wait;
 
-    # align reads to the assembly using blasr
+    # align reads to the assembly using minimap2
     my $inputs = $self->read_list("$$self{fofn}");
-    my $cpus = $self->num_cpus($$self{blasr_options});
-    $self->set_limits(%{$$self{limits}}, %{$$self{blasr_limits}}, $cpus ? (cpus => $cpus) : ());
+    my $cpus = $self->num_cpus($$self{minimap2_options});
+    $self->set_limits(%{$$self{limits}}, %{$$self{minimap2_limits}}, $cpus ? (cpus => $cpus) : ());
     my @aligned_bams;
     foreach my $input (@$inputs)
     {
         my ($base) = $input =~ m/([^\/]+)\.(bam|bax.h5)$/;
-        $self->spawn('blasr',"$$self{outdir}/aligned/${base}.aligned.sorted.bam",$input);
+        $self->spawn('minimap2',"$$self{outdir}/aligned/${base}.aligned.sorted.bam",$input);
         push @aligned_bams, "$$self{outdir}/aligned/${base}.aligned.sorted.bam";
     }
     $self->wait;
@@ -143,21 +142,23 @@ sub main
 
     # create one BAM file for each scaffold or group of smaller scaffolds
     my $regions = $self->read_fai("$$self{assembly}.fai");
-    while ( my ($id, $regs) = each %$regions )
+    $self->set_limits(memory => 5000, time => 60, cpus => 1);
+    foreach my $id (sort {$a <=> $b} keys %$regions)
     {
-        $self->spawn('merge',"$$self{outdir}/merge/$id.bam",$regs,$aligned_bams_fofn);
+        $self->spawn('merge',"$$self{outdir}/merge/$id.bam",$$regions{$id},$aligned_bams_fofn);
     }
     $self->wait;
 
     # polish each scaffold or group of smaller scaffolds
-    $cpus = $self->num_cpus($$self{arrow_options});
-    $self->set_limits(%{$$self{limits}}, %{$$self{arrow_limits}}, $cpus ? (cpus => $cpus) : ());
-    while ( my ($id, $regs) = each %$regions )
+    $cpus = $self->num_cpus($$self{gcpp_options});
+    $self->set_limits(%{$$self{limits}}, %{$$self{gcpp_limits}}, $cpus ? (cpus => $cpus) : ());
+    foreach my $id (sort {$a <=> $b} keys %$regions)
     {
-        $self->spawn('polish',"$$self{outdir}/polish/$id.fasta.gz",$regs,"$$self{outdir}/merge/$id.bam");
+        $self->spawn('polish',"$$self{outdir}/polish/$id.fasta.gz",$$regions{$id},"$$self{outdir}/merge/$id.bam");
     }
     $self->wait;
 
+    $self->set_limits(memory => 12000, runtime => 20, cpus => undef);
     my @ids = sort { $a <=> $b } keys %$regions;
     # Combine polished FASTA files
     my $fastas = [ map { "$$self{outdir}/polish/$_.fasta.gz" } @ids ];
@@ -165,9 +166,9 @@ sub main
     # Combine polished FASTQ files
     my $fastqs = [ map { "$$self{outdir}/polish/$_.fastq.gz" } @ids ];
     $self->spawn('combine_fastq',"$$self{outdir}/polished.fastq.gz",$fastqs);
-    # Combine the GFF files describing the differences between the polished & unpolished assembly
-    my $gffs = [ map { "$$self{outdir}/polish/$_.gff.gz" } @ids ];
-    $self->spawn('combine_gff',"$$self{outdir}/polished.gff.gz",$gffs);
+    # Combine the VCF files describing the differences between the polished & unpolished assembly
+    my $vcfs = [ map { "$$self{outdir}/polish/$_.vcf.gz" } @ids ];
+    $self->spawn('combine_vcf',"$$self{outdir}/polished.vcf.gz",$vcfs);
     $self->wait;
 
     $self->all_done;
@@ -178,40 +179,61 @@ sub prepare_fasta
     my ($self,$outfile,$fasta) = @_;
     if ($fasta =~ /\.gz/)
     {
-        $self->cmd(qq[$$self{gzip} -dc $fasta > $outfile.part]);
+        $self->cmd(qq[$$self{bgzip} -dc $fasta | sed 's/[:|]/_/g' > $outfile.part]);
     }
     else
     {
-        $self->cmd(qq[cp $fasta $outfile.part]);
+        $self->cmd(qq[sed 's/[:|]/_/g' $fasta > $outfile.part]);
     }
     rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
-sub sawriter
-{
-    my ($self,$outfile) = @_;
-    $self->cmd(qq[$$self{sawriter} $outfile.part $$self{assembly}]);
-    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
-}
-
-sub faidx
+sub mmidx
 {
     my ($self,$outfile) = @_;
     $self->cmd(qq[$$self{samtools} faidx $$self{assembly}]);
-    $self->throw(qq[samtools faidx failed to produce fai file [$outfile]]) unless (-e $outfile);
+    my $size = ceil( (-s $$self{assembly}) / 1e9 );
+    my $idx_size = $size > 4 ? " -I${size}G" : '';
+    $self->cmd(qq[$$self{minimap2} -axmap-pb$idx_size -d $outfile.part $$self{assembly}]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
-sub blasr
+sub minimap2
 {
     my ($self,$outfile,$bam) = @_;
-    $self->cmd(qq[$$self{blasr} $bam $$self{assembly} --sa $$self{assembly}.sa $$self{blasr_options} --out $outfile.tmp.bam]);
-    my $cpus = $self->num_cpus($$self{blasr_options});
+    my $cpus = $self->num_cpus($$self{minimap2_options});
+    my $mmidx = $$self{assembly};
+    $mmidx =~ s/fasta$/mmi/;
+    unless (-s "$bam.pbi")
+    {
+        $self->cmd(qq[$$self{pbindex} $bam]);
+    }
+    $self->cmd(qq[$$self{samtools} fastq -n $bam | $$self{minimap2} -axmap-pb -t$cpus --secondary=no $mmidx - | $$self{samtools} view -\@4 -F0x04 -bT $$self{assembly} -o $outfile.mm2.bam]);
+    $self->cmd(qq[$$self{pbbamify} --input $outfile.mm2.bam --output $outfile.tmp.bam $$self{assembly} $bam]);
     $cpus = $cpus > 6 ? 6 : $cpus;
     my $sort_options = "-T $outfile.sort_tmp -OBAM";
     my $threads = $cpus ? " -\@$cpus" : "";
+    $self->SUPER::cmd(qq[rm ${outfile}.sort_tmp.*.bam]) if (glob(qq[${outfile}.sort_tmp.*.bam])); # clean up failed samtools sort tmp files if necessary
     $self->cmd(qq[$$self{samtools} sort$threads $sort_options -o $outfile.part $outfile.tmp.bam]);
-    $self->cmd(qq[$$self{samtools} index$threads $outfile.part $outfile.bai]);
-    $self->cmd(qq[rm $outfile.tmp.bam]);
+    $self->cmd(qq[$$self{samtools} index -c$threads $outfile.part $outfile.bai]);
+    $self->SUPER::cmd(qq[rm $outfile.tmp.bam $outfile.mm2.bam]);
+    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+# tried to switch to pbmm2 for mapping, but can't set tmp directory, which can
+# then get full so need to wait for that issue to be fixed
+sub pbmm2
+{
+    my ($self,$outfile,$bam) = @_;
+    my $cpus = $self->num_cpus($$self{minimap2_options});
+    my $mmidx = $$self{assembly};
+    $mmidx =~ s/fasta$/mmi/;
+    $self->cmd(qq[$$self{pbmm2} align -j $cpus $bam $mmidx $outfile.tmp.bam]);
+    $cpus = $cpus > 6 ? 6 : $cpus;
+    $self->SUPER::cmd(qq[rm ${outfile}_sort_tmp.*.bam]) if (glob(qq[${outfile}_sort_tmp.*.bam])); # clean up failed samtools sort tmp files if necessary
+    $self->cmd(qq[$$self{samtools} sort -\@$cpus -T ${outfile}_sort_tmp -OBAM -o $outfile.part $outfile.tmp.bam]);
+    $self->SUPER::cmd(qq[rm $outfile.tmp.bam]);
+    $self->cmd(qq[$$self{samtools} index -c -\@$cpus $outfile.part $outfile.bai]);
     rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -247,23 +269,27 @@ sub merge
     if (scalar @$regs == 1)
     {
         my $reg = shift @$regs;
-        $self->cmd(qq[$$self{samtools} merge -cp -R $$reg{contig} -b $fofn $outfile.part.bam]);
+        $self->cmd(qq[$$self{samtools} merge -cpf -R "$$reg{contig}" -b $fofn $outfile.part.bam]);
     }
     else
     {
         my @region_bams;
         foreach my $reg (@$regs)
         {
-            $self->cmd(qq[$$self{samtools} merge -cp -R $$reg{contig} -b $fofn $outfile.$$reg{contig}.bam]);
-            push @region_bams, "$outfile.$$reg{contig}.bam";
+            my $ctg = $$reg{contig};
+            $ctg =~ s/[:|]/_/g;
+            $self->cmd(qq[$$self{samtools} merge -cpf -R "$$reg{contig}" -b $fofn $outfile.$ctg.bam]);
+            push @region_bams, "$outfile.$ctg.bam";
         }
         $self->write_list("$outfile.list",\@region_bams);
         $self->cmd(qq[$$self{samtools} cat -b $outfile.list -o $outfile.part.bam]);
-        $self->cmd(qq[cat $outfile.list | xargs rm]);
-        $self->cmd(qq[rm $outfile.list]);
+        $self->SUPER::cmd(qq[cat $outfile.list | xargs rm]);
+        $self->SUPER::cmd(qq[rm $outfile.list]);
     }
-    $self->cmd(qq[$$self{pbindex} $outfile.part.bam]);
-    rename("$outfile.part.bam.pbi", "$outfile.pbi") or $self->throw("rename $outfile.part.bam.pbi $outfile.pbi: $!");
+    $self->cmd(qq[$$self{samtools} quickcheck -vvv $outfile.part.bam]);
+    $self->cmd(qq[$$self{samtools} index -c $outfile.part.bam $outfile.part.bam.bai]); # trick gcpp into reading a CSI file by naming as BAI
+    # rename("$outfile.part.bam.pbi", "$outfile.pbi") or $self->throw("rename $outfile.part.bam.pbi $outfile.pbi: $!");
+    rename("$outfile.part.bam.bai", "$outfile.bai") or $self->throw("rename $outfile.part.bam.bai $outfile.bai: $!");
     rename("$outfile.part.bam", $outfile) or $self->throw("rename $outfile.part.bam $outfile: $!");
 }
 
@@ -273,157 +299,63 @@ sub polish
     my $prefix = $outfile;
     $prefix =~ s/\.fasta.gz//;
     my $reg = shift @$regs;
-    my $win = "$$reg{contig}:$$reg{beg}-$$reg{end}";
+    my $win = qq["$$reg{contig}:$$reg{beg}-$$reg{end}"];
     foreach $reg (@$regs)
     {
-        $win .= ",$$reg{contig}:$$reg{beg}-$$reg{end}";
+        $win .= qq[,"$$reg{contig}:$$reg{beg}-$$reg{end}"];
     }
-    $self->cmd(qq[unset PYTHONPATH && $$self{arrow} $$self{arrow_options} -w $win -r $$self{assembly} -o $prefix.gff -o $prefix.fasta -o $prefix.fastq $bam]);
-    my $cpus = $self->num_cpus($$self{arrow_options});
-    my $proc = ($cpus && ($$self{gzip} =~ /pigz/)) ? " -p$cpus" : "";
-    $self->cmd(qq[cat $prefix.gff | $$self{gzip}$proc -c > $prefix.gff.gz]);
-    $self->cmd(qq[cat $prefix.fastq | $$self{gzip}$proc -c > $prefix.fastq.gz]);
-    $self->cmd(qq[cat $prefix.fasta | $$self{gzip}$proc -c > $outfile.part]);
-    $self->cmd(qq[rm $prefix.gff $prefix.fasta $prefix.fastq]);
+    $self->cmd(qq[$$self{gcpp} $$self{gcpp_options} -w $win -r $$self{assembly} $bam -o $prefix.fasta,$prefix.fastq,$prefix.vcf]);
+    my $cpus = $self->num_cpus($$self{gcpp_options});
+    $self->cmd(qq[cat $prefix.vcf | $$self{bgzip} -c\@$cpus > $prefix.vcf.gz]);
+    $self->cmd(qq[cat $prefix.fastq | $$self{bgzip} -c\@$cpus > $prefix.fastq.gz]);
+    $self->cmd(qq[cat $prefix.fasta | $$self{bgzip} -c\@$cpus > $outfile.part]);
+    $self->cmd(qq[rm $prefix.vcf $prefix.fasta $prefix.fastq]);
     rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
-
-######################################################
-# Line-wrapped command :
-#-----------------------------------------------------
-#
-#   zcat $outdir/polish/*.fasta.gz
-#   | awk
-#   '
-#       BEGIN{
-#           h="";
-#           s="";
-#       }
-#       {
-#           if($1~/^>/){
-#               if(h!=""){
-#                   print h"\t"s;
-#               };
-#
-#               h=$1;
-#               s="";
-#           }
-#           else{
-#               s=s""$1;
-#           }
-#       }
-#       END{
-#           print h"\t"s;
-#       }
-#   '
-#   | sort -k1,1
-#   | sed -r 's/\t/\n/g'
-#   | gzip -c
-#   > $outfile.fasta.gz
-#
-######################################################
 
 sub combine_fasta
 {
     my ($self,$outfile,$fastas) = @_;
-    $self->cmd(qq[$$self{gzip} -dc $$self{outdir}/polish/*.fasta.gz | ] . q*awk 'BEGIN{h="";s="";}{if($1~/^>/){if(h!=""){print h"\t"s;};h=$1;s="";}else{s=s""$1;}}END{print h"\t"s;}' | sort -k1,1 | sed -r 's/\t/\n/g'* . qq[ | $$self{gzip} -c > $outfile.part]);
+    $self->write_list(qq[$outfile.fofn],$fastas);
+    $self->cmd(qq[( for fa in `cat $outfile.fofn`; do $$self{bgzip} -dc \$fa; done ) | sed 's/|arrow/_arrow/' | $$self{bgzip} -c > $outfile.part]);
+    $self->SUPER::cmd(qq[rm $outfile.fofn]);
+    $self->cmd(qq[asmstats $outfile.part > $outfile.stats]);
     rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
-
-######################################################
-# Line-wrapped command :
-#-----------------------------------------------------
-#
-#   zcat $outdir/polish/*.fastq.gz
-#   | sed -r 'N;s/\n/\t/g'
-#   | sed -r 'N;s/\n/\t/g'
-#   | sort -k1,1
-#   | sed -r 's/\t/\n/g'
-#   | gzip -c
-#   > $outfile.fastq.gz
-#
-######################################################
 
 sub combine_fastq
 {
     my ($self,$outfile,$fastqs) = @_;
-    $self->cmd(qq[$$self{gzip} -dc $$self{outdir}/polish/*.fastq.gz | ] . q*sed -r 'N;s/\n/\t/g' | sed -r 'N;s/\n/\t/g' | sort -k1,1 | sed -r 's/\t/\n/g'* . qq[ | $$self{gzip} -c > $outfile.part]);
+    $self->write_list(qq[$outfile.fofn],$fastqs);
+    $self->cmd(qq[( for fq in `cat $outfile.fofn`; do $$self{bgzip} -dc \$fq; done ) | sed 's/|arrow/_arrow/' | $$self{bgzip} -c > $outfile.part]);
+    $self->SUPER::cmd(qq[rm $outfile.fofn]);
     rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
-######################################################
-# Line-wrapped command :
-#-----------------------------------------------------
-#
-#   zcat $outdir/polish/*.gff.gz
-#   | grep -E "^##"
-#   | grep -Ev "^##date[[:blank:]]"
-#   | sed -r '/source-/ s/\/[^[:blank:]]+\///g'
-#   | sort -u
-#   | awk -v cdate="`date`"
-#   '
-#       BEGIN{
-#           printf "%02d\t%s %s\n",3,"##date",cdate;
-#       }
-#       {
-#           if($0~/^##gff-version/){
-#               printf "%02d\t%s\n",1,$0;
-#           };
-#           if($0~/^##pacbio-variant-version/){
-#               printf "%02d\t%s\n",2,$0;
-#           };
-#           if($0~/^##feature-ontology/){
-#               printf "%02d\t%s\n",4,$0;
-#           };
-#           if($0~/^##source[[:blank:]]/){
-#               printf "%02d\t%s\n",5,$0;
-#           };
-#           if($0~/^##source-reference-file/){
-#               printf "%02d\t%s\n",6,$0;
-#           };
-#           if($0~/^##source-alignment-file/){
-#               printf "%02d\t%s\n",7,$0;
-#           };
-#           if($0~/^##source-commandline/){
-#               printf "%02d\t%s\n",8,$0;
-#           };
-#           if($0~/^##sequence-region/){
-#               printf "%02d\t%s\n",9,$0;
-#           };
-#       }
-#       END{}
-#   '
-#   | sort -k1,1
-#   | cut -f 1 --complement
-#   > $outfile.header
-#
-#
-#   zcat $outdir/polish/*.gff.gz
-#   | grep -Ev "^#"
-#   | sort -k1,1 -k4,4n -k5,5n
-#   > $outfile.data
-#
-#
-#   cat $outfile.header $outfile.data
-#   | gzip -c
-#   > $outfile.gff.gz"
-#
-######################################################
-
-sub combine_gff
+sub combine_vcf
 {
-    my ($self,$outfile,$gffs) = @_;
-    $self->cmd(qq[$$self{gzip} -dc $$self{outdir}/polish/*.gff.gz | ] . q[grep -E "^##" | grep -Ev "^##date[[:blank:]]" | sed -r '/source-/ s/\/[^[:blank:]]+\///g' | sort -u | awk -v cdate="`date`" 'BEGIN{printf "%02d\t%s %s\n",3,"##date",cdate;}{if($0~/^##gff-version/){printf "%02d\t%s\n",1,$0;};if($0~/^##pacbio-variant-version/){printf "%02d\t%s\n",2,$0;};if($0~/^##feature-ontology/){printf "%02d\t%s\n",4,$0;};if($0~/^##source[[:blank:]]/){printf "%02d\t%s\n",5,$0;};if($0~/^##source-reference-file/){printf "%02d\t%s\n",6,$0;};if($0~/^##source-alignment-file/){printf "%02d\t%s\n",7,$0;};if($0~/^##source-commandline/){printf "%02d\t%s\n",8,$0;};if($0~/^##sequence-region/){printf "%02d\t%s\n",9,$0;};}END{}' | sort -k1,1 | cut -f 1 --complement] . qq[ > $outfile.header]);
-    $self->cmd(qq[$$self{gzip} -dc $$self{outdir}/polish/*.gff.gz | ] . q[grep -Ev "^#" | sort -k1,1 -k4,4n -k5,5n] . qq[ > $outfile.data]);
-    $self->cmd(qq[cat $outfile.header $outfile.data | $$self{gzip} -c > $outfile.part]);
-    $self->cmd(qq[rm $outfile.header $outfile.data]);
-    rename("$outfile.part", $outfile) or $self->throw("rename $outfile.part $outfile: $!");
+    my ($self,$outfile,$vcfs) = @_;
+    $self->write_list(qq[$outfile.fofn],$vcfs);
+    $self->cmd(qq[$$self{bcftools} concat -f $outfile.fofn | sed 's/|arrow/_arrow/' | $$self{bgzip} -c > $outfile.part]);
+    $self->SUPER::cmd(qq[rm $outfile.fofn]);
+    $self->index_part($outfile);
+}
+
+sub index_part
+{
+    my ($self,$vcf,$threads) = @_;
+    my $cmd = "$$self{bcftools} index -f";
+    $cmd .= " --threads $threads" if (defined $threads && $threads);
+    $self->cmd("$cmd $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
 }
 
 sub num_cpus
 {
     my ($self,$opts) = @_;
-    my (undef,$cpus) = $opts =~ m/-(j|nproc)\s*(\d+)/;
+    my (undef,$cpus) = $opts =~ m/-(j|t|nproc)\s*(\d+)/;
     return $cpus ? $cpus : '';
 }
 
@@ -460,11 +392,11 @@ sub save_config
     my $dst = "$$self{outdir}/arrow.conf";
     if ( -e $dst && $src && (stat($src))[9] <= (stat($dst))[9] ) { return; }
     # if ( -e $dst && !$src) { return; }
-    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    if ( !-d $$self{outdir} ) { $self->SUPER::cmd("mkdir -p $$self{outdir}"); }
     open(my $fh,'>',$dst) or $self->throw("$dst: $!");
     my $about = $$self{_about};
     $about =~ s/\n/\n# /g;
     print $fh "# $about";
     close($fh);
-    $self->cmd("cat $src >> $dst") if $src;
+    $self->SUPER::cmd("cat $src >> $dst") if $src;
 }
