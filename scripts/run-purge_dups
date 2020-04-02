@@ -20,6 +20,7 @@ use strict;
 use warnings;
 
 use File::Basename;
+use Cwd;
 use POSIX;
 
 sub new
@@ -28,9 +29,12 @@ sub new
     my $self = $class->SUPER::new(@args);
 
     $$self{verbose} = 1;
+    $$self{samtools} = '/software/vertres/bin-external/samtools';
     $$self{minimap2} = '/software/vertres/bin-external/minimap2';
-    $$self{purge_dups} = '/software/vertres/bin-external/purge_dups/src';
-    $$self{bgzip} = 'bgzip';
+    $$self{seqtk} = '/software/vertres/bin-external/seqtk';
+    $$self{asmstats} = '/software/vertres/codebase/scripts/asmstats';
+    $$self{purge_dups} = '/software/vertres/bin-external/purge_dups-v1.2.3/bin';
+    $$self{bgzip} = '/software/vertres/bin-external/bgzip';
     $$self{limits} = { memory=>3_500 };
     $$self{config_version} = '1427807557';
     $$self{_sampleconf} = q[
@@ -45,8 +49,15 @@ sub new
         "Options:\n" .
         "   -a, --asm <file>         primary assembly\n" .
         "   -h, --htigs <file>       haplotig assembly (optional)\n" .
-        "   -f, --fofn <file>        path to file listing PacBio BAM or fasta files\n" .
+        "   -f, --fofn <file>        path to file listing input files (BAM or fasta/fastq files)\n" .
+        "   -F, --fasta <file>       path to a single input fasta file\n" .
         "   -o, --outdir <dir>       output directory\n" .
+        "   -g, --gscope <dir>       genomescope model.txt file - use to set haploid-diploid coverage cutoff (for PacBio CCS data)\n" .
+        "       --no-plot            do not plot coverage histogram\n" .
+        "   -x, --mm2_opts <str>     minimap2 mapping options [-xmap-pb]\n" .
+        "                              -xmap-pb  for PacBio CLR (default)\n" .
+        "                              -xmap-ont for ONT\n" .
+        "                              ccs       for PacBio CCS\n" .
         "\n";
 
     return $self;
@@ -55,18 +66,26 @@ sub new
 sub parse_args
 {
     my ($self) = @_;
+    $$self{mm2_opts} = '-xmap-pb';
+    $$self{noplot} = 0;
     while (defined(my $arg=shift(@ARGV)))
     {
         if ( $arg eq '-f' or $arg eq '--fofn' ) { $$self{fofn}=shift(@ARGV); next; }
+        if ( $arg eq '-F' or $arg eq '--file' ) { $$self{file}=shift(@ARGV); next; }
         if ( $arg eq '-a' or $arg eq '--asm' ) { $$self{asm}=shift(@ARGV); next; }
         if ( $arg eq '-h' or $arg eq '--htigs' ) { $$self{htigs}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-g' or $arg eq '--gscope' ) { $$self{gscope}=shift(@ARGV); next; }
+        if ( $arg eq '-x' or $arg eq '--mm2_opts' ) { $$self{mm2_opts}=shift(@ARGV); next; }
+        if (                 $arg eq '--no-plot' ) { $$self{noplot}=1; next; }
         if ( $arg eq '-?' or $arg eq '--help' ) { $self->throw(); }
         $self->throw("Unknown argument: $arg\n");
     }
     if ( !defined($$self{outdir}) ) { $self->throw("Expected the -o option."); }
     if ( !defined($$self{asm}) ) { $self->throw("Expected the -a option."); }
-    if ( !defined($$self{fofn}) ) { $self->throw("Expected the -f option."); }
+    if ( !defined($$self{fofn}) && !defined($$self{file}) ) { $self->throw("Expected one of the -f or -F options."); }
+    if ( $$self{mm2_opts} eq 'ccs' || $$self{mm2_opts} eq '-xccs' ) { $$self{mm2_opts} = '-k19 -w10 -O5,56 -E4,1 -A2 -B5 -z400,50 -r2000 --lj-min-ratio 0.5'; } # these options from pbmm2 CSS preset
+    if ( $$self{gscope} ) { $$self{gscope} = Cwd::abs_path($$self{gscope}); }
 }
 
 # #Step 1. Run minimap2 to align pacbio data and generate paf files, then calculate read depth histogram and base-level read depth. Commands are as follows:
@@ -95,8 +114,9 @@ sub main
     $self->save_config('purge');
 
     if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+    $self->version("$$self{outdir}/version");
 
-    my $files = $self->read_list($$self{fofn});
+    my $files = $$self{fofn} ? $self->read_list($$self{fofn}) : [ $$self{file} ];
 
     $self->set_limits(memory => 100000, time => 1200, cpus => 16);
     foreach my $file (@$files)
@@ -143,14 +163,14 @@ sub main
         $self->wait();
 
         $self->set_limits(memory => 120000, time => 60, cpus => undef);
-        $self->spawn('purge_dups',qq[$$self{outdir}/purge_dups.htigs/dups.bed.gz],qq[$$self{outdir}/split_aln.htigs/self_aln.paf.gz],qq[$$self{outdir}/coverage.htigs/cutoffs],qq[$$self{outdir}/coverage.htigs/PB.base.cov]);
+        $self->spawn('purge_dups',qq[$$self{outdir}/purge_dups.htigs/dups.bed.gz],qq[$$self{outdir}/split_aln.htigs/self_aln.paf.gz],qq[$$self{outdir}/coverage/cutoffs],qq[$$self{outdir}/coverage.htigs/PB.base.cov]);
         $self->wait();
 
         $self->spawn('get_seqs',qq[$$self{outdir}/seqs.htigs/purged.fa.gz],$htigs,qq[$$self{outdir}/purge_dups.htigs/dups.bed.gz]);
         $self->wait();
     }
-    $self->cmd(qq[cp $$self{outdir}/seqs/purged.fa.gz $$self{outdir}/purged.fa.gz]);
-    $self->cmd(qq[asmstats $$self{outdir}/purged.fa.gz > $$self{outdir}/purged.fa.gz.stats]);
+    $self->cmd(qq[cp $$self{outdir}/seqs/purged.fa.gz $$self{outdir}/purged.fa.gz]) unless (-s qq[$$self{outdir}/purged.fa.gz]);
+    $self->cmd(qq[$$self{asmstats} $$self{outdir}/purged.fa.gz > $$self{outdir}/purged.fa.gz.stats]) unless (-s qq[$$self{outdir}/purged.fa.gz.stats]);
     if (exists $$self{htigs})
     {
         $self->cmd(qq[cp $$self{outdir}/seqs.htigs/purged.fa.gz $$self{outdir}/purged.htigs.fa.gz]);
@@ -159,8 +179,7 @@ sub main
     {
         $self->cmd(qq[cp $$self{outdir}/seqs/purged.htigs.fa.gz $$self{outdir}/purged.htigs.fa.gz]);
     }
-    $self->cmd(qq[asmstats $$self{outdir}/purged.htigs.fa.gz > $$self{outdir}/purged.htigs.fa.gz.stats]);
-    $self->cmd(qq[cat $$self{outdir}/purged.fa.gz $$self{outdir}/purged.htigs.fa.gz > $$self{outdir}/purged.diploid.fa.gz]);
+    $self->cmd(qq[$$self{asmstats} $$self{outdir}/purged.htigs.fa.gz > $$self{outdir}/purged.htigs.fa.gz.stats]);
 
     $self->cmd("touch $$self{outdir}/all_done");
     $self->all_done;
@@ -174,12 +193,19 @@ sub minimap2
         my $stats = $self->parse_asmstats("$asm.stats");
         $size = $$stats{sum};
     } else {
-        $size = `seqtk comp $asm | awk '{sum+=\$2}END{print sum}'`; chomp $size;
+        $size = `$$self{seqtk} comp $asm | awk '{sum+=\$2}END{print sum}'`; chomp $size;
     }
     $self->throw("could not get size of fasta $asm") unless $size;
     $size = ceil( $size / 1e9 );
     my $idx_size = $size > 4 ? " -I${size}G" : '';
-    $self->cmd(qq[$$self{minimap2} -t16 -xmap-pb$idx_size $asm $file | $$self{bgzip} -c > $outfile.part]);
+    if ($file =~ m/(b|cr)am$/)
+    {
+        $self->cmd(qq[$$self{samtools} fasta -\@4 $file | $$self{minimap2} -t12 $$self{mm2_opts}$idx_size $asm - | $$self{bgzip} -c > $outfile.part]);
+    }
+    else
+    {
+        $self->cmd(qq[$$self{minimap2} -t16 $$self{mm2_opts}$idx_size $asm $file | $$self{bgzip} -c > $outfile.part]);
+    }
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -189,7 +215,7 @@ sub split_aln
     my $prefix = $outfile;
     $prefix =~ s/\.paf(\.gz)?$//;
     $self->cmd(qq[$$self{purge_dups}/split_fa $asm | $$self{bgzip} -c > $prefix.fa.gz]);
-    my $size = `seqtk comp $prefix.fa.gz | awk '{sum+=\$2}END{print sum}'`; chomp $size;
+    my $size = `$$self{seqtk} comp $prefix.fa.gz | awk '{sum+=\$2}END{print sum}'`; chomp $size;
     $self->throw("could not get size of fasta $asm") unless $size;
     $size = ceil( $size / 1e9 );
     my $idx_size = $size > 4 ? " -I${size}G" : '';
@@ -204,8 +230,25 @@ sub coverage
     chdir($outdir);
     $outfile = basename($outfile);
     $self->cmd(qq[$$self{purge_dups}/pbcstat *.paf.gz]);
-    $self->cmd(qq[$$self{purge_dups}/calcuts PB.stat > $outfile.part]);
-    $self->cmd(qq[unset PYTHONPATH && python $$self{purge_dups}/../scripts/hist_plot.py -c $outfile.part PB.stat $outfile.png]);
+    my $calcuts_opts = '';
+    if ($$self{gscope})
+    {
+        my $cov;
+        open(my $fh, "<$$self{gscope}") or $self->throw("Could not open file $$self{gscope}: $!");
+        while (<$fh>)
+        {
+            next unless (/^kmercov/);
+            chomp;
+            (undef,$cov,undef) = split /\s+/;
+        }
+        close($fh) or $self->throw("Could not close $$self{gscope}: $!");
+        $self->throw("$cov Could not parse coverage from $$self{gscope}") unless $cov;
+        $cov = int($cov + $cov/2);
+        my $max = 4*$cov;
+        $calcuts_opts = "-m $cov -u $max";
+    }
+    $self->cmd(qq[$$self{purge_dups}/calcuts $calcuts_opts PB.stat > $outfile.part]);
+    $self->cmd(qq[unset PYTHONPATH && python $$self{purge_dups}/../scripts/hist_plot.py -c $outfile.part PB.stat $outfile.png]) unless ($$self{noplot});
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -220,17 +263,18 @@ sub get_seqs
 {
     my ($self,$outfile,$asm,$bed) = @_;
     $outfile =~ s/\.fa\.gz?$//;
-    $self->cmd(qq[$$self{purge_dups}/get_seqs $bed $asm > $outfile.tmp 2> $outfile.htigs.tmp]);
-    $self->cmd(qq[cat $outfile.htigs.tmp | $$self{bgzip} -c > $outfile.htigs.fa.gz && rm $outfile.htigs.tmp]);
-    $self->cmd(qq[cat $outfile.tmp | $$self{bgzip} -c > $outfile.fa.gz.part && rm $outfile.tmp]);
+    $self->cmd(qq[$$self{purge_dups}/get_seqs -e $bed $asm -p $outfile.tmp]); # -e added to stop introducing gaps into contigs
+    $self->cmd(qq[cat $outfile.tmp.hap.fa | $$self{bgzip} -c > $outfile.htigs.fa.gz && rm $outfile.tmp.hap.fa]);
+    $self->cmd(qq[cat $outfile.tmp.purged.fa | $$self{bgzip} -c > $outfile.fa.gz.part && rm $outfile.tmp.purged.fa]);
+    $self->cmd(qq[$$self{asmstats} $outfile.fa.gz.part > $outfile.fa.gz.stats]);
     rename("$outfile.fa.gz.part","$outfile.fa.gz") or $self->throw("rename $outfile.fa.gz.part $outfile.fa.gzs: $!");
 }
 
 sub concat_htigs
 {
     my ($self,$outfile,$file1,$file2) = @_;
-    $self->cmd(qq[zcat $file1 $file2 | $$self{bgzip} -c > $outfile.part]);
-    $self->cmd(qq[asmstats $outfile.part > $outfile.stats]);
+    $self->cmd(qq[($$self{seqtk} seq $file1 && $$self{seqtk} seq $file2) | fold | $$self{bgzip} -c > $outfile.part]);
+    $self->cmd(qq[$$self{asmstats} $outfile.part > $outfile.stats]);
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
 }
 
@@ -247,6 +291,17 @@ sub read_list
     }
     close($fh) or $self->throw("Could not close $file: $!");
     return \@list;
+}
+
+sub version
+{
+    my ($self, $file) = @_;
+    $self->cmd(qq[$$self{purge_dups}/purge_dups 2>&1 | grep ^Version | awk '{print \$2}' > $file], exit_on_error => 0);
+    if (-d qq[$$self{purge_dups}/../.git])
+    {
+        $file = Cwd::abs_path($file);
+        $self->cmd(qq[cd $$self{purge_dups}/.. && git describe --always --dirty >> $file]);
+    }
 }
 
 # sum = 1094337346, n = 3099, ave = 353125.958696354, largest = 7658067, smallest = 6049
