@@ -54,6 +54,7 @@ sub new
         "   -o, --outdir <dir>       output directory\n" .
         "   -g, --gscope <dir>       genomescope model.txt file - use to set haploid-diploid coverage cutoff (for PacBio CCS data)\n" .
         "       --no-plot            do not plot coverage histogram\n" .
+        "   -c  --cutoffs            use manualy cutoffs - lower,middle,upper (e.g. 10,23,-, where dash does not override the default)\n" .
         "   -x, --mm2_opts <str>     minimap2 mapping options [-xmap-pb]\n" .
         "                              -xmap-pb  for PacBio CLR (default)\n" .
         "                              -xmap-ont for ONT\n" .
@@ -75,6 +76,7 @@ sub parse_args
         if ( $arg eq '-a' or $arg eq '--asm' ) { $$self{asm}=shift(@ARGV); next; }
         if ( $arg eq '-h' or $arg eq '--htigs' ) { $$self{htigs}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-c' or $arg eq '--cutoffs' ) { $$self{cutoffs}=shift(@ARGV); next; }
         if ( $arg eq '-g' or $arg eq '--gscope' ) { $$self{gscope}=shift(@ARGV); next; }
         if ( $arg eq '-x' or $arg eq '--mm2_opts' ) { $$self{mm2_opts}=shift(@ARGV); next; }
         if (                 $arg eq '--no-plot' ) { $$self{noplot}=1; next; }
@@ -231,7 +233,14 @@ sub coverage
     $outfile = basename($outfile);
     $self->cmd(qq[$$self{purge_dups}/pbcstat *.paf.gz]);
     my $calcuts_opts = '';
-    if ($$self{gscope})
+    if ($$self{cutoffs})
+    {
+        my ($l,$m,$u) = split(',', $$self{cutoffs});
+        $calcuts_opts .= "-l $l " unless ($l eq '-');
+        $calcuts_opts .= "-m $m " unless ($m eq '-');
+        $calcuts_opts .= "-u $u " unless ($u eq '-');
+    }
+    elsif ($$self{gscope})
     {
         my $cov;
         open(my $fh, "<$$self{gscope}") or $self->throw("Could not open file $$self{gscope}: $!");
