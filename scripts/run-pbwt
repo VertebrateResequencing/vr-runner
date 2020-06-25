@@ -131,7 +131,7 @@ sub main
     my %merge = ();
     for my $chunk (@$samples)
     {
-        for my $chr (keys %$chrs)
+        for my $chr (sort keys %$chrs)
         {
             my $src_file = $$chunk{src_file};
             if ( !exists($$chrs{$chr}{$src_file}) ) { next; }
@@ -149,9 +149,9 @@ sub main
 
     # merge samples back, but do this in parallel on smaller chunks, as merging is slow with many samples
     my @merge = ();
-    for my $src_file (keys %merge)
+    for my $src_file (sort keys %merge)
     {
-        for my $chr (keys %{$merge{$src_file}})
+        for my $chr (sort keys %{$merge{$src_file}})
         {
             push @merge, { src_file=>$src_file, region=>$chr, vcf=>$merge{$src_file}{$chr}, fmt=>$$self{fmt} };
         }

@@ -50,7 +50,7 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
         my $groups = {};
         my $keys   = { alpha=>[qw(a b c)], num=>[qw(1 2 3)] };
         my $sleep  = 1;
-        for my $group (keys %$keys)
+        for my $group (sort keys %$keys)
         {
             for my $suffix (@{$$keys{$group}})
             {
@@ -72,7 +72,7 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
         #   $self->group_done($done,$grp)
         #   $self->group_done($done,[$grp1,$grp2,$grp3])
 
-        for my $group (keys %$done)
+        for my $group (sort keys %$done)
         {
             $self->spawn('group',"$ENV{HOME}/Hello.$group",$$done{$group});
         }
@@ -627,6 +627,11 @@ sub _freeze
                 manually by the user. When 'fs' is cleaned by the user, the pipeline must be run with +nocache
                 in order to notice the change. 
                 Note that 'spawn' only schedules the tasks and the jobs are submitted to the farm by the 'wait' call.
+
+                Important: the caller must ensure that jobs are spawned in the same order, make sure when a sort
+                statement is included when iterating over hash keys:
+                    for $job (sort keys %jobs) { spawn('method',"outfile.$job"); }
+
     Usage : $self->spawn("method",$done_file,@params);
     Args  : <func_name>
                 The method to be run
@@ -902,6 +907,9 @@ sub _init_scheduler
 =head2 wait
 
     About : Checkpoint, submit the jobs scheduled by 'spawn' to the farm and wait for all tasks to finish. 
+            Important: the caller must ensure that jobs were spawned in the same order, make sure when a sort
+            statement is included when iterating over hash keys:
+                for $job (sort keys %jobs) { spawn('method',"outfile.$job"); }
     Usage : $self->spawn("method",$done_file1,@params1); 
             $self->spawn("method",$done_file2,@params2);
             $self->wait();

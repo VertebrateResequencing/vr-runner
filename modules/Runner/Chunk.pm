@@ -23,9 +23,9 @@ Runner::Chunk - create a list of regions
 
     # list chromosomes
     my $chrs = Runner::Chunk::list_chrs( vcf=>['file.bcf'], cache=>'chrs.txt' );
-    for my $chr (keys %$chrs)
+    for my $chr (sort keys %$chrs)
     {
-        for my $file (keys %{$$chrs{$chr}})
+        for my $file (sort keys %{$$chrs{$chr}})
         {
             print "$chr\t$file\n";
         }
@@ -166,9 +166,9 @@ sub list_chrs
         }
     }
     open(my $fh,'>',$args{cache}) or confess("$args{cache}: $!");
-    for my $reg (keys %regs) 
+    for my $reg (sort keys %regs) 
     { 
-        for my $file (keys %{$regs{$reg}})
+        for my $file (sort keys %{$regs{$reg}})
         {
             print $fh "$reg\t$file\n"; 
         }
