@@ -248,7 +248,7 @@ sub mrProper
     my $chunks = $self->read_chunks();
     my %chroms = ();
     for my $chunk (@$chunks) { $chroms{$$chunk[0]} = 1; }
-    for my $chr (keys %chroms)
+    for my $chr (sort keys %chroms)
     {
         $self->cmd("rm -rf $outdir/$chr");
     }

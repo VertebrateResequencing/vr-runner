@@ -105,7 +105,7 @@ sub list_chrs
     my %reg2chr = ();
     if ( exists($args{regions}) )
     {
-        for my $reg (keys %{$args{regions}})
+        for my $reg (sort keys %{$args{regions}})
         {
             if ( $reg=~/^([^:]+):/ ) { $reg2chr{$reg} = $1; }
         }
@@ -148,7 +148,7 @@ sub list_chrs
         }
         if ( exists($args{regions}) )
         {
-            for my $reg (keys %{$args{regions}})
+            for my $reg (sort keys %{$args{regions}})
             {
                 my $chr = exists($reg2chr{$reg}) ? $reg2chr{$reg} : $reg;
                 if ( !exists($chrs{$chr}) ) { next; }

@@ -473,19 +473,19 @@ sub _write_jobs
     my @unlink = ();
     my $jids_file = "$job_name.jid";
     open(my $fh,'>',$jids_file) or $self->throw("$jids_file: $!\n");
-    for my $id (keys %{$$jobs{Running}})
+    for my $id (sort keys %{$$jobs{Running}})
     {
         my $job = $$jobs{Running}{$id};
         print $fh "$id\t$$job{array_id}\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";
         if ( exists($$job{unlink}) ) { push @unlink,$$job{unlink}; }
     }
-    for my $id (keys %{$$jobs{Error}})
+    for my $id (sort keys %{$$jobs{Error}})
     {
         my $job = $$jobs{Error}{$id};
         print $fh "$id\t-1\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";
         if ( exists($$job{unlink}) ) { push @unlink,$$job{unlink}; }
     }
-    for my $id (keys %{$$jobs{Done}})
+    for my $id (sort keys %{$$jobs{Done}})
     {
         my $job = $$jobs{Done}{$id};
         print $fh "$id\t0\t$$job{nfailures}\t$$job{memlimit}\t$$job{runtime}\n";

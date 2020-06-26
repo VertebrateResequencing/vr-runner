@@ -215,12 +215,12 @@ sub init_jobs
     if ( scalar keys %zombi_warning )
     {
         my %arrays = ();
-        for my $lsf_id (keys %zombi_warning)
+        for my $lsf_id (sort keys %zombi_warning)
         {
             if ( $lsf_id =~ s/^(\d+)\[(\d+)\]$// ) { push @{$arrays{$1}},$2; }
         }
         my @id_strings = ();
-        for my $id (keys %arrays)
+        for my $id (sort keys %arrays)
         {
             while ( @{$arrays{$id}} )
             {

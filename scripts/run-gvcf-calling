@@ -146,7 +146,7 @@ sub main
     }
     else
     {
-        for my $chr (keys %chrs)
+        for my $chr (sort keys %chrs)
         {
             push @vcfs, "$outdir/$chr.bcf";
             $self->spawn('merge_chunks',"$outdir/$chr.bcf",$chunks,$chr);
@@ -169,7 +169,7 @@ sub main
 sub mrProper
 {
     my ($self,$outdir) = @_;
-    for my $pop (keys %{$$self{pops}})
+    for my $pop (sort keys %{$$self{pops}})
     {
         $self->cmd("rm -rf $outdir/$pop");
     }

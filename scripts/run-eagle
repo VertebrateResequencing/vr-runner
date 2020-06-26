@@ -134,7 +134,7 @@ sub main
     my %merge = ();
     for my $chunk (@$samples)
     {
-        for my $chr (keys %$chrs)
+        for my $chr (sort keys %$chrs)
         {
             my $src_file = $$chunk{src_file};
             if ( !exists($$chrs{$chr}{$src_file}) ) { next; }
@@ -156,9 +156,9 @@ sub main
     my @dst_files = ();
     if ( $$self{merge_samples} )
     {
-        for my $src_file (keys %merge)
+        for my $src_file (sort keys %merge)
         {
-            for my $chr (keys %{$merge{$src_file}})
+            for my $chr (sort keys %{$merge{$src_file}})
             {
                 push @dst_files, { src_file=>$src_file, region=>$chr, vcf=>$merge{$src_file}{$chr}, fmt=>$$self{fmt} };
             }
@@ -181,7 +181,7 @@ sub main
                 push @{$tasks{$src}{list}}, "$$file{dst_dir}/$$file{dst_file}.$fmt";
             }
             my @concat = ();
-            for my $src (keys %tasks) 
+            for my $src (sort keys %tasks) 
             { 
                 push @concat, { list=>$tasks{$src}{list}, src_file=>$src, region=>'all', fmt=>$$self{fmt} }; 
             }
@@ -195,9 +195,9 @@ sub main
     }
     else
     {
-        for my $src_file (keys %merge)
+        for my $src_file (sort keys %merge)
         {
-            for my $chr (keys %{$merge{$src_file}})
+            for my $chr (sort keys %{$merge{$src_file}})
             {
                 for my $file (@{$merge{$src_file}{$chr}})
                 {

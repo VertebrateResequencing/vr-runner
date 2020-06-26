@@ -238,7 +238,7 @@ sub check_md5
     my $bam_md5 = $self->parse_header_md5($fh);
     close($fh) or $self->throw("close failed: $$self{samtools} view -H $bam");
 
-    for my $chr (keys %$bam_md5)
+    for my $chr (sort keys %$bam_md5)
     {
         if ( !exists($$ref_md5{$chr}) ) { next; }   # cannot check
         if ( $$ref_md5{$chr} ne $$bam_md5{$chr} ) { $self->throw("MD5 mismatch for $chr:\n\t$$ref_md5{$chr}\t$ref_hdr\n\t$$bam_md5{$chr}\t$bam\n"); }

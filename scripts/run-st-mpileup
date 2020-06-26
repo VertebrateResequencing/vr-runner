@@ -262,7 +262,7 @@ sub main
 
     # Call the variants
 	# $self->write_annot_file();    not calling vcf-annotate by default any more
-    for my $pop (keys %{$$self{pops}})
+    for my $pop (sort keys %{$$self{pops}})
     {
         for my $chunk (@$chunks)
         {
@@ -287,7 +287,7 @@ sub main
             my $from = $$chunk{from};
             my $to   = $$chunk{to};
             my @vcfs = ();
-            for my $pop (keys %{$$self{pops}})
+            for my $pop (sort keys %{$$self{pops}})
             {
                 if ( $pop eq 'pooled' ) { next; }
                 push @vcfs, "$outdir/$pop/$chr/$chr:$from-$to.vcf.gz";
@@ -303,7 +303,7 @@ sub main
 
 	# Merge the files and apply hard filtering. Two branches for whole-genome or per-chromosome files
 	my @vcfs;
-	for my $pop (keys %{$$self{pops}})
+	for my $pop (sort keys %{$$self{pops}})
 	{
 		if ( $$self{merge_chroms} ) 
 		{ 
@@ -345,7 +345,7 @@ sub main
 sub mrProper
 {
     my ($self,$outdir) = @_;
-    for my $pop (keys %{$$self{pops}})
+    for my $pop (sort keys %{$$self{pops}})
     {
         $self->cmd("rm -rf $outdir/$pop");
     }
@@ -357,7 +357,7 @@ sub clean
     my ($self,$outdir) = @_;
     $self->SUPER::clean($outdir);
     my $chunks = $self->get_chunks;
-    for my $pop (keys %{$$self{pops}})
+    for my $pop (sort keys %{$$self{pops}})
     {
         for my $chunk (@$chunks)
         {
@@ -426,7 +426,7 @@ sub check_sanity
     }
     close($fh);
 
-    for my $pl (keys %pl)
+    for my $pl (sort keys %pl)
     {
         if ( !exists($bam_pls{$pl}) ) { $self->throw("The platform \"$pl\" not present in any of the BAMs.\n"); }
     }
@@ -610,7 +610,7 @@ sub sample_list
     close($in);
 
     open(my $out,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
-    if ( !defined $sexes ) { $sexes = $self->get_sample_sex(keys %samples); }
+    if ( !defined $sexes ) { $sexes = $self->get_sample_sex(sort keys %samples); }
     for my $sample (sort keys %samples)
     {
         print $out "$sample\t$$sexes{$sample}\n";
@@ -674,14 +674,14 @@ sub read_fai
     my ($self,$fai,$regexs) = @_;
 
     my %chunk_opts = ();
-    for my $key (keys %{$$self{chunk_options}})
+    for my $key (sort keys %{$$self{chunk_options}})
     {
         my ($chr,$fromto) = split(/:/,$key);
         if ( !defined $fromto or $fromto eq '' ) { next; }
         my ($from,$to) = split(/-/,$fromto);
         push @{$chunk_opts{$chr}},[$from,$to];
     }
-    for my $chr (keys %{$$self{ploidy}})
+    for my $chr (sort keys %{$$self{ploidy}})
     {
         if ( ref($$self{ploidy}{$chr}) ne 'ARRAY' ) { next; }
         for my $reg (@{$$self{ploidy}{$chr}})
@@ -690,7 +690,7 @@ sub read_fai
             push @{$chunk_opts{$chr}},[$from,$to];
         }
     }
-    for my $chr (keys %chunk_opts)
+    for my $chr (sort keys %chunk_opts)
     {
         $chunk_opts{$chr} = [ sort { $$a[0]<=>$$b[0] } @{$chunk_opts{$chr}} ];
     }
@@ -768,7 +768,7 @@ sub set_chunk_options
     my ($self,$chr,$from,$to) = @_;
     if ( !exists($$self{chunk_options}) ) { return; }
     my $hit;
-    for my $chunk (keys %{$$self{chunk_options}})
+    for my $chunk (sort keys %{$$self{chunk_options}})
     {
         if ( !($chunk=~/^([^:]+):(\d+)-(\d+)$/) && !($chunk=~/^([^:]+)$/) ) { $self->throw("Could not parse chunk_options: [$chunk]"); }
         if ( $chr ne $1 ) { next; }

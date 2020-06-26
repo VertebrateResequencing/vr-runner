@@ -662,7 +662,7 @@ sub clean_project
     debug_msg($opts,"Cleaning project: $name\n");
     $$project{prefix} = "$$opts{dropbox_tmp}/$$project{run_id}/$name";
 
-    for my $dst (keys %{$$project{outputs}})
+    for my $dst (sort keys %{$$project{outputs}})
     {
         # Create a subdirectory '$dst' and move all listed files in there:
         #   dst => [ 'src1','src2' ]
@@ -868,7 +868,7 @@ sub parse_step
     # set step-specific keys ("pbwt/key: value") and keys shared by all steps ("*/key: value")
     my %reserved = map { $_ => 1 } (qw(include run));
     my %predef = ( prefix=>$$project{prefix} );
-    for my $var (keys %$setup)
+    for my $var (sort keys %$setup)
     {
         my ($name,$key) = split(m{/},$var);
         if ( $name eq '*' or $name eq $step_name )
@@ -877,14 +877,14 @@ sub parse_step
             if ( !exists($predef{$key}) && defined $$setup{$var} ) { $predef{$key} = $$setup{$var}; }
         }
     }
-    for my $var (keys %{$$chain{$step_name}})
+    for my $var (sort keys %{$$chain{$step_name}})
     {
         if ( $reserved{$var} or exists($predef{$var}) or !defined $$chain{$step_name}{$var} ) { next; }
         $predef{$var} = expand_vars(\%predef,$$chain{$step_name}{$var});
     }
 
     # expand 
-    for my $key (keys %$step)
+    for my $key (sort keys %$step)
     {
         my $value = $$step{$key};
         if ( !defined $value ) { next; }    # allow undef as override
@@ -898,7 +898,7 @@ sub parse_step
         # override defaults in step's runner config. Originally, only keys
         # from the step.config would be written, but that was inconvenient.
         # Now we include all predefeined keys in the config.
-        for my $key (keys %predef)
+        for my $key (sort keys %predef)
         {
             if ( $reserved{$key} ) { next; } # reserved keys: include,run
             $$step{config}{$key} = parse_config_value($predef{$key});

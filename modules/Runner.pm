@@ -479,7 +479,7 @@ sub set_limits
 {
     my ($self,%args) = @_;
     $$self{_farm_options} = { %{$$self{_farm_options}}, %args };
-    for my $key (keys %{$$self{_farm_options}})
+    for my $key (sort keys %{$$self{_farm_options}})
     {
         if ( !defined($$self{_farm_options}{$key}) ) { delete($$self{_farm_options}{$key}); }
     }
@@ -548,7 +548,7 @@ sub inc_limits
         $dst  = $$self{_farm_options};
         %args = @params;
     }
-    for my $key (keys %args)
+    for my $key (sort keys %args)
     {
         if ( !defined($args{$key}) ) { next; }
         if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
@@ -769,7 +769,7 @@ sub _mark_as_finished
 
     if ( !exists($$self{_jobs_db_dirty}) ) { return; }
 
-    for my $wfile (keys %{$$self{_jobs_db_dirty}})
+    for my $wfile (sort keys %{$$self{_jobs_db_dirty}})
     {
         if ( !$$self{_jobs_db_dirty}{$wfile} ) { next; }
 
@@ -811,7 +811,7 @@ sub _get_unfinished_jobs
     my $nprn_done = 0;
     my $nprn_pend = 0;
     my $finished_jobs = {};
-    for my $call (keys %calls)
+    for my $call (sort keys %calls)
     {
         my @list = @{$calls{$call}};
         my $min_len = length($list[0]{done_file});
@@ -880,7 +880,7 @@ sub _group_finished_jobs
 {
     my ($self,$groups,$finished_jobs) = @_;
     my %done = ();
-    for my $grp (keys %$finished_jobs)
+    for my $grp (sort keys %$finished_jobs)
     {
         if ( !exists($$groups{$grp}) or scalar @{$$groups{$grp}} != scalar keys %{$$finished_jobs{$grp}} ) { next; }
         $done{$grp} = $$groups{$grp};
@@ -948,7 +948,7 @@ sub wait
                     push @{$$groups{__all__}}, $$chk{done_file};
                 }
             }
-            for my $grp (keys %{$args[0]})
+            for my $grp (sort keys %{$args[0]})
             {
                 my %unique = ();
                 for my $job (@{$args[0]{$grp}}) 
@@ -989,14 +989,14 @@ sub wait
         return $self->_group_finished_jobs($groups, $finished_jobs); 
     }
     my $n = 0;
-    for my $wfile (keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
+    for my $wfile (sort keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
     if ( $$self{_maxjobs} && $$self{_maxjobs} < $$self{_jobs_db_unfinished} ) { $n = "$$self{_maxjobs}+"; }
     $self->debugln("\t-> $n unfinished");
 
     # With '+local', the jobs will be run serially
     if ( $$self{_run_locally} ) 
     {
-        for my $wfile (keys %$jobs)
+        for my $wfile (sort keys %$jobs)
         {
             $$self{_store} = $$jobs{$wfile};
             my $rfile = $self->_freeze($wfile);
@@ -1025,7 +1025,7 @@ sub wait
     my $is_running = 0;
 
     # Each wfile corresponds to a single task group, each typically having multiple parallel jobs
-    for my $wfile (keys %$jobs)     
+    for my $wfile (sort keys %$jobs)     
     {
         # unique id for this step and output directory
         my $prefix = $self->_get_temp_prefix($wfile);
@@ -1162,7 +1162,7 @@ sub wait
         my $clusters = $self->_cluster_jobs($$jobs{$wfile}, \@ids, $job2grp);
         for my $cluster (@$clusters)
         {
-            for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
+            for my $dir (sort keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
             for my $id (@{$$cluster{ids}}) { $self->_write_user_limits($$cluster{limits}, $rfile, $id); }
             my $ok;
             eval 
@@ -1214,19 +1214,19 @@ sub _cluster_jobs
     # Merge clusters if their limits are identical; this is to prevent submitting
     # too many job arrays for each group individually
     my %limits = ();
-    for my $grp (keys %$clusters)
+    for my $grp (sort keys %$clusters)
     {
         if ( !exists($$clusters{$grp}{ids}) ) { next; } # this group may have no active jobs
 
         my @sign = ('x');  # an arbitrary non-empty string
-        for my $key (keys %{$$clusters{$grp}{limits}})
+        for my $key (sort keys %{$$clusters{$grp}{limits}})
         {
             push @sign, "$key-".(defined($$clusters{$grp}{limits}) ? $$clusters{$grp}{limits} : '');
         }
         my $sign = join(';',@sign);
         push @{$limits{$sign}}, $grp;
     }
-    for my $sign (keys %limits)
+    for my $sign (sort keys %limits)
     {
         if ( scalar @{$limits{$sign}} == 1 ) { next; }
         for (my $i=1; $i<@{$limits{$sign}}; $i++)
@@ -1237,7 +1237,7 @@ sub _cluster_jobs
             $$clusters{$agrp}{ids}  = { %{$$clusters{$agrp}{ids}}, %{$$clusters{$bgrp}{ids}} };
         }
     }
-    for my $grp (keys %$clusters)
+    for my $grp (sort keys %$clusters)
     {
         $$clusters{$grp}{ids} = [ sort {$a<=>$b} keys %{$$clusters{$grp}{ids}} ];
         if ( !@{$$clusters{$grp}{ids}} ) { delete($$clusters{$grp}); }
