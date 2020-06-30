@@ -299,7 +299,7 @@ sub set_chunk_options
     my ($self,$chr,$from,$to) = @_;
     if ( !exists($$self{chunk_options}) ) { return; }
     my $hit;
-    for my $chunk (keys %{$$self{chunk_options}})
+    for my $chunk (sort keys %{$$self{chunk_options}})
     {
         if ( !($chunk=~/^([^:]+):(\d+)-(\d+)$/) ) { $self->throw("Could not parse the chunk_options: [$chunk]"); }
         if ( $chr ne $1 ) { next; }

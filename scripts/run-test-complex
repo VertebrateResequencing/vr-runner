@@ -65,7 +65,7 @@ sub main
     # that each group can proceed independently of the others.
 
     $self->set_limits(memory=>500);     # Just to show how to decrease the limits again
-    for my $group (keys %$done)
+    for my $group (sort keys %$done)
     {
         $self->spawn('group',"$ENV{HOME}/Hello.$group",$$done{$group});
     }

@@ -89,7 +89,7 @@ sub main
     #   + out1  => path/to/new/reads1.fastq.gz
     #   + out2  => path/to/new/reads2.fastq.gz
     #   + stats => path/to/new/stats.txt
-    for my $pair (keys %$files)
+    for my $pair (sort keys %$files)
     {
         $$files{$pair}{out1}  = "$$self{outdir}/out/$pair.1.fastq.gz";
         $$files{$pair}{out2}  = "$$self{outdir}/out/$pair.2.fastq.gz";
@@ -108,7 +108,7 @@ sub create_list
 {
     my ($self,$list,$files) = @_;
     open(my $fh,'>',$list) or $self->throw("$list: $!");
-    for my $pair (keys %$files)
+    for my $pair (sort keys %$files)
     {
         print $fh "$$files{$pair}{out1},$$files{$pair}{out2}\t-\t\@RG\\tID:$$files{$pair}{name}\\tSM:$$self{sample}\n";
     }

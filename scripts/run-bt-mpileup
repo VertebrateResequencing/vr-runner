@@ -165,7 +165,7 @@ sub main
 
     $self->set_limits(%{$$self{limits}}) unless !exists($$self{limits});
     my %chrs = ();
-    for my $group (keys %$groups)
+    for my $group (sort keys %$groups)
     {
         for my $chunk (@$chunks)
         {
@@ -184,7 +184,7 @@ sub main
 
     # Concatenate chunks and apply filtering
     my @vcfs = ();
-    for my $group (keys %$groups)
+    for my $group (sort keys %$groups)
     {
         if ( $$self{merge_chroms} )
         {
@@ -193,7 +193,7 @@ sub main
         }
         else
         {
-            for my $chr (keys %chrs)
+            for my $chr (sort keys %chrs)
             {
                 push @vcfs, "$outdir/$group/$chr.bcf";
                 $self->spawn('merge_chunks',"$outdir/$group/$chr.bcf",$$groups{$group},$chunks,$chr);
@@ -209,16 +209,16 @@ sub main
         if ( $$self{merge_chroms} )
         {
             my @merge = ();
-            for my $group (keys %$groups) { push @merge, "$outdir/$group.bcf"; }
+            for my $group (sort keys %$groups) { push @merge, "$outdir/$group.bcf"; }
             $self->spawn('merge_vcfs',"$outdir/merged/all.bcf",\@merge);
             push @vcfs,@merge;
         }
         else
         {
-            for my $chr (keys %chrs)
+            for my $chr (sort keys %chrs)
             {
                 my @merge = ();
-                for my $group (keys %$groups) { push @merge, "$outdir/$group/$chr.bcf"; }
+                for my $group (sort keys %$groups) { push @merge, "$outdir/$group/$chr.bcf"; }
                 $self->spawn('merge_vcfs',"$outdir/merged/$chr.bcf",\@merge);
                 push @vcfs,@merge;
             }
@@ -242,7 +242,7 @@ sub main
 sub mrProper
 {
     my ($self,$outdir) = @_;
-    for my $pop (keys %{$$self{pops}})
+    for my $pop (sort keys %{$$self{pops}})
     {
         $self->cmd("rm -rf $outdir/$pop");
     }
@@ -257,7 +257,7 @@ sub clean
     my $groups = $self->init_groups();
     my $chunks = $self->init_chunks();
     my %chrs = ();
-    for my $group (keys %$groups)
+    for my $group (sort keys %$groups)
     {
         for my $chunk (@$chunks)
         {
@@ -271,7 +271,7 @@ sub clean
                 unlink($file) unless !-e $file;
             }
         }
-        for my $chr (keys %chrs)
+        for my $chr (sort keys %chrs)
         {
             rmdir("$outdir/$group/$chr");
             unlink("$outdir/$group/$chr.list") unless (!-e "$outdir/$group/$chr.list");
@@ -346,7 +346,7 @@ sub init_groups
             chomp($items[-1]);
             my $grp  = exists($cols{grp}) ? $items[$cols{grp}] : 'all';
             my $smpl = {};
-            for my $col (keys %cols) { $$smpl{$col} = $items[$cols{$col}]; }
+            for my $col (sort keys %cols) { $$smpl{$col} = $items[$cols{$col}]; }
             push @{$$groups{$grp}{list}}, $smpl;
         }
         close($fh) or $self->throw("close failed: $$self{alns}{fname}");
@@ -372,7 +372,7 @@ sub init_groups
             close($fh) or $self->throw("close failed: $$self{alns}");
         }
     }
-    for my $group (keys %$groups)
+    for my $group (sort keys %$groups)
     {
         $$groups{$group}{name} = $group;
         $self->write_group($$self{outdir},$$groups{$group});
@@ -478,7 +478,7 @@ return;
     }
     close($fh);
 
-    for my $pl (keys %pl)
+    for my $pl (sort keys %pl)
     {
         if ( !exists($bam_pls{$pl}) ) { $self->throw("The platform \"$pl\" not present in any of the BAMs.\n"); }
     }
@@ -652,7 +652,7 @@ sub debug_commands
     my ($self) = @_;
     my ($chr,$pos) = split(/:/, $$self{debug});
     my $groups = $self->init_groups();
-    my $group  = (keys %$groups)[0];
+    my $group  = (sort keys %$groups)[0];
     my $alns   = $$groups{$group}{alns};
 
     my $cmd = 

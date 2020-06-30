@@ -153,7 +153,7 @@ sub bam2groups
             $$smpl{$1} = 1;
         }
         if ( scalar keys %$smpl > 1 ) { $self->throw("Expected one sample in $bam, found more: ".join(',',keys %$smpl)); }
-        print $fh "$bam\t".(keys %$smpl)[0]."\n";
+        print $fh "$bam\t".(sort keys %$smpl)[0]."\n";
     }
     close($fh) or $self->throw("close failed: $outfile.part");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
