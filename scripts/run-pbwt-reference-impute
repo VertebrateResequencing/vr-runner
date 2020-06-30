@@ -303,7 +303,7 @@ sub get_regions
         close($fh) || $self->throw("$$self{outdir}/lists/regions.list: $!");
     }
 
-    $self->throw("No regions found") unless (keys %regions);
+    $self->throw("No regions found") unless (sort keys %regions);
 
     return \%regions;
 }
@@ -352,7 +352,7 @@ sub mrProper
     my $chunks = $self->read_chunks();
     my %chroms = ();
     for my $chunk (@$chunks) { $chroms{$$chunk[0]} = 1; }
-    for my $chr (keys %chroms)
+    for my $chr (sort keys %chroms)
     {
         $self->cmd("rm -rf $outdir/$chr");
     }

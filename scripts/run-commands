@@ -127,7 +127,7 @@ sub create_io_map
 {
     my ($self,$files) = @_;
     if ( !defined $$self{io_map} ) { return; }
-    for my $map (keys %{$$self{io_map}})
+    for my $map (sort keys %{$$self{io_map}})
     {
         my $map_name = $self->expand_vars($map,%$self);
         open(my $fh,'>',$map_name) or $self->throw("$map_name: $!");
