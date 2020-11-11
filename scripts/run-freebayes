@@ -25,7 +25,7 @@ sub new
     my $self = $class->SUPER::new(@args);
 
     $$self{config_version} = '1427807557';
-    $$self{chunk_size} = 1_000_000;
+    $$self{chunk_size} = 10_000_000;
     $$self{freebayes} = 'LD_LIBRARY_PATH=/software/hgi/pkglocal/gcc-4.9.1/lib:/software/hgi/pkglocal/gcc-4.9.1/lib64:$LD_LIBRARY_PATH /nfs/users/nfs_p/pd3/sandbox/svn/freebayes/freebayes/bin/freebayes';
     $$self{limits}    = { runtime=>24*60, memory=>5_000 };
     $$self{do_clean}  = 1;
@@ -41,6 +41,7 @@ sub new
             fasta      => undef,
             bam        => undef,
             bam_list   => undef,
+            regions    => undef,    # e.g. [ qw(11 20) ]
 
             limits     => { runtime=>24*60, memory=>10_000 },
             do_clean   => 1,
@@ -55,7 +56,7 @@ sub new
         "   -B, --bam-list <file>   \n" .
         "   -f, --fasta <file>      \n" .
         "   -o, --outdir <dir>      \n" .
-        "   -t, --targets <file>    \n" .
+        "   -r, --regions <file>    \n" .
         "\n";
 
     return $self;
@@ -70,7 +71,8 @@ sub parse_args
         if ( $arg eq '-B' or $arg eq '--bam-list' ) { $$self{bam_list}=shift(@ARGV); next; }
         if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
-        if ( $arg eq '-t' or $arg eq '--targets' ) { $$self{targets}=shift(@ARGV); next; }
+        if ( $arg eq '-t' or $arg eq '--targets' ) { $$self{regions}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--regions' ) { $$self{regions}=shift(@ARGV); next; }
         $self->throw();
     }
     if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
@@ -84,7 +86,7 @@ sub main
     $self->parse_args();
     if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
 
-    my $chunks = $self->read_fai("$$self{fasta}.fai");
+    my $chunks = $self->init_chunks();
     if ( !@$chunks ) { $self->throw("No chunks to run?\n"); }
 
     $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
@@ -118,6 +120,96 @@ sub clean
     $self->cmd("rm -rf $$self{outdir}/chunks");
 }
 
+sub init_chunks
+{
+    my ($self) = @_;
+
+    my $regions = [];
+    if ( !exists($$self{regions}) or !defined($$self{regions}) )
+    {
+        my $chrs = $self->read_fai("$$self{fasta}.fai");
+        for my $chr (sort keys %$chrs) { push @$regions, { chr=>$chr, beg=>1, end=>$$chrs{$chr} }; }
+    }
+    elsif ( ref($$self{regions}) eq 'ARRAY' )
+    {
+        my $lengths;
+        for my $reg (@{$$self{regions}})
+        {
+            my ($chr,$start,$end);
+            if ( $reg=~/^([^:]+):+([^-]+)-(.+)$/ ) { $chr=$1; $start=$2; $end=$3; }
+            elsif ( $reg=~/^([^:]+)$/ )
+            {
+                $chr = $1;  
+                if ( !defined $lengths ) { $lengths = $self->read_fai("$$self{fasta}.fai"); }
+                if ( !exists($$lengths{$chr}) ) { $self->throw("Chromosome \"$chr\" not in $$self{fasta}.fai?"); }
+                $start = 1;
+                $end = $$lengths{$chr};
+            }
+            else { $self->throw("Could not parse the region: $reg\n"); }
+            push @$regions, { chr=>$chr, beg=>$start, end=>$end };
+        }
+    }
+    else
+    {
+        $regions = $self->read_regions($$self{regions});
+    }
+
+    my @chunks;
+    for my $region (@$regions)
+    {
+        my $pos     = $$region{beg};
+        my $end_pos = $$region{end};
+        while ($pos<$end_pos)
+        {
+            my $beg = $pos;
+            my $end = $beg + $$self{chunk_size}-1;
+            if ( $end > $end_pos ) { $end = $end_pos; }
+
+            push @chunks, { chr=>$$region{chr}, beg=>$beg, end=>$end };
+
+            $pos += $$self{chunk_size};
+            if ( $pos<1 ) { $self->throw("The split size too small [$$self{chunk_size}]?\n"); }
+
+            if ( $$self{debug_chunks} && scalar @chunks>=$$self{debug_chunks} ) { return \@chunks; }
+        }
+    }
+
+    return \@chunks;
+}
+
+sub read_regions
+{
+    my ($self,$file) = @_;
+    open(my $fh,'<',$file) or $self->throw("$file: $!"); 
+    my @regions;
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        if ( !($line=~/^(\S+)\s+(\d+)\s+(\d+)\s*$/) ) { $self->throw("Could not parse the regions file $file: [$line]"); }
+        push @regions, { chr=>$1, beg=>$2, end=>$3 };
+    }
+    return \@regions;
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    # Determine the chromosomes and their lengths
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    my %chr_lengths;
+    while (my $line=<$fh>)
+    {
+        my @items = split(/\s+/,$line);
+        my $chr = $items[0];
+        my $len = $items[1];
+        $chr_lengths{$chr} = $len;
+    }
+    close($fh);
+    if ( !scalar keys %chr_lengths ) { $self->throw("No sequences read from $fai??"); }
+    return \%chr_lengths;
+}
+
 sub index_part
 {
     my ($self,$vcf) = @_;
@@ -140,59 +232,6 @@ sub merge
     $self->cmd("bcftools concat -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools sort -Ou -T $outfile.tmp.XXXXXX | bcftools norm -f $$self{fasta} -Ob -o $outfile.part");
 
     $self->index_part($outfile);
-}
-
-sub read_fai
-{
-    my ($self,$fai) = @_;
-
-    my %chrs = ();
-    if ( exists($$self{targets}) )
-    {
-        open(my $fh,'<',$$self{targets}) or $self->throw("$$self{targets}: $!");
-        while (my $line=<$fh>)
-        {
-            chomp($line);
-            $line =~ s/^\s*//;
-            $line =~ s/\s*$//;
-            $chrs{$line} = 1;
-        }
-        close($fh) or $self->throw("close failed: $$self{targets}");
-    }
-
-    # Determine the chromosomes and their lengths
-    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
-    my @chunks = ();
-    while (my $line=<$fh>)
-    {
-        my ($chr,$end,undef) = split(/\t/,$line);
-        if ( scalar keys %chrs && !exists($chrs{$chr}) ) { next; }
-
-        my $beg = 1;
-        push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
-        if ( !$$self{chunk_size} or $chunks[-1]{end} - $chunks[-1]{beg} + 1 < $$self{chunk_size} ) { next; }
-
-        # chunk the contigs into smaller pieces
-        while ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 > $$self{chunk_size} )
-        {
-            my $beg = $chunks[-1]{beg} + $$self{chunk_size};
-            my $end = $chunks[-1]{end};
-            $chunks[-1]{end} = $beg - 1;
-            push @chunks, { chr=>$chr, beg=>$beg, end=>$end };
-        }
-
-        # if last chunk is too small, make the previous bigger
-        if ( $chunks[-1]{end} - $chunks[-1]{beg} + 1 < 0.3*$$self{chunk_size} )
-        {
-            my $end = $chunks[-1]{end};
-            pop @chunks;
-            $chunks[-1]{end} = $end;
-        }
-    }
-    close($fh);
-
-    if ( !@chunks ) { $self->throw("No sequences read from $fai??"); }
-    return \@chunks;
 }
 
 sub run_freebayes
