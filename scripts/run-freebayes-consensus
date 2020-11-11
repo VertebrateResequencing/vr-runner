@@ -1,0 +1,259 @@
+#!/usr/bin/env perl
+#
+# Author: sm15@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+use File::Basename;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{group_size} = 100;
+    $$self{freebayes} = 'freebayes';
+    $$self{samtools} = 'samtools';
+    $$self{bcftools} = '/nfs/users/nfs_s/sm15/dev/bcftools/bcftools';
+    $$self{bedtools} = 'bedtools';
+    $$self{seqtk} = 'seqtk';
+    $$self{prim_regex} = '^HiC';
+    # $$self{alts_regex} = '^0';
+    $$self{limits}    = { runtime=>24*60, memory=>30_000 };
+    $$self{do_clean}  = 1;
+    $$self{verbose}   = 1;
+
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your
+            #  config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            group_size => '] .$$self{group_size}.  q[',
+            freebayes  => '] .$$self{freebayes}.  q[',
+            fasta      => undef,
+            bam        => undef,
+
+            limits     => { runtime=>24*60, memory=>20_000 },
+            do_clean   => 1,
+    ]."\n";
+
+
+    $$self{usage} .=
+        "About: Given a BAM file and assembly fasta, run freebayes and bcftools consensus to polish the assembly\n" .
+        "Usage: run-freebayes-consensus\n" .
+        "Options:\n" .
+        "   -b, --bam <file>      input BAM file [required]       \n" .
+        "   -f, --fasta <file>    fasta reference used for BAM file [required]     \n" .
+        "   -s, --summary <file>  longranger summary.csv file to get coverage     \n" .
+        "   -o, --outdir <dir>    output directory [required]     \n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bam' ) { $$self{bam}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-s' or $arg eq '--summary' ) { $$self{summary}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o/--outdir option."); }
+    if ( !defined($$self{bam}) )   { $self->throw("Expected the -b/--bam option."); }
+    if ( !defined($$self{fasta}) ) { $self->throw("Expected the -f/--fasta option."); }
+
+    if (exists $$self{summary})
+    {
+        my $cov = `sed 's/,/\\t/g' $$self{summary} | transpose | grep mean_depth | cut -f2`;
+        $cov = sprintf("%.0f", $cov) if ($cov);
+        $$self{mean_cov} = $cov if ($cov);
+
+    }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+    $self->save_config();
+
+    if ( !-d "$$self{outdir}/chunks" ) { $self->cmd("mkdir -p $$self{outdir}/chunks"); }
+    my $groups = $self->read_fai("$$self{fasta}.fai");
+    if ( !(keys %$groups) ) { $self->throw("No chunks to run?\n"); }
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+
+    # $self->spawn('genomecov',"$$self{outdir}/qv/genomecov",$$self{bam});
+
+    while (my ($gid, $chunks) = each %$groups)
+    {
+        $self->spawn('freebayes',"$$self{outdir}/chunks/$gid/.freebayes.done",$chunks);
+    }
+    $self->wait;
+
+    $self->set_limits(%{$$self{limits}}, cpus => undef);
+    $self->spawn('concat',"$$self{outdir}/merged.bcf","$$self{outdir}/chunks/merge.list");
+    $self->wait;
+
+    $self->set_limits(%{$$self{limits}}, cpus => undef);
+    $self->spawn('consensus',"$$self{outdir}/consensus.fasta","$$self{outdir}/merged.bcf",$$self{fasta});
+    # $self->spawn('qv',"$$self{outdir}/qv/.qv.done","$$self{outdir}/merged.bcf","$$self{outdir}/qv/genomecov");
+    $self->wait;
+
+    $self->clean();
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,$chunks) = @_;
+    if ( !$$self{do_clean} )  { return; }
+    $self->SUPER::clean($$self{outdir});
+    $self->cmd("rm -rf $$self{outdir}/chunks");
+}
+
+sub freebayes
+{
+    my ($self,$outfile,$chunks) = @_;
+    foreach my $chunk (@$chunks)
+    {
+        my $chunk_outfile = $$chunk{file};
+        next if (-s $chunk_outfile);
+        my $cmd = qq[$$self{freebayes} --bam $$self{bam} --region "$$chunk{chr}:$$chunk{beg}-$$chunk{end}" -f $$self{fasta}];
+        $cmd .= qq[ --skip-coverage ] . $$self{mean_cov}*12 if (exists $$self{mean_cov});
+        $cmd .= qq[ | $$self{bcftools} view --no-version -Ou -e'type="ref"||REF~"N"'];
+        $cmd .= qq[ | $$self{bcftools} norm --no-version -Ob -f $$self{fasta} -o $chunk_outfile.part];
+        $self->cmd($cmd);
+        $self->index_part($chunk_outfile);
+    }
+    foreach my $chunk (@$chunks)
+    {
+        $self->throw("File $$chunk{file} not created") unless (-s $$chunk{file});
+    }
+    $self->cmd("touch $outfile");
+}
+
+sub concat
+{
+    my ($self,$outfile,$list) = @_;
+    $self->cmd("$$self{bcftools} concat -nf $list > $outfile.part");
+    $self->index_part($outfile);
+}
+
+sub consensus
+{
+    my ($self,$outfile,$bcf) = @_;
+    $self->cmd(qq[$$self{bcftools} consensus -i'QUAL>1 && (GT="AA" || GT="Aa")' -Hla -f $$self{fasta} $bcf > $outfile.part]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub genomecov
+{
+    my ($self,$outfile,$bam) = @_;
+    $self->cmd(qq[$$self{samtools} view -F0x100 -u $bam | $$self{bedtools} genomecov -ibam - -split > $outfile.part]);
+    $self->cmd(q[awk '{if ($1=="genome" && $2>3) {numbp += $3}} END {print numbp}' ] . qq[$outfile.part > $outfile.numbp]);
+    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+}
+
+sub qv
+{
+    my ($self,$outfile,$bcf,$genomecov) = @_;
+
+    my $dir = dirname($outfile);
+    # $self->cmd(qq[$$self{bcftools} view -Ob -i'QUAL>1 && (GT="AA" || GT="Aa")' $bcf > $dir/changes.bcf.part]);
+    # $self->index_part(qq[$dir/changes.bcf]);
+
+    foreach my $hap (qw(prim alts))
+    {
+        next unless exists ($$self{"${hap}_regex"});
+        $self->cmd(qq[$$self{seqtk} comp $$self{fasta} | grep $$self{"${hap}_regex"} | ] . q[awk '{print $1"\t"$2"\t"$2-$9}'] . qq[ > $dir/$hap.len]);
+        $self->cmd(q[awk '{print $1"\t0\t"$2}'] . qq[ $dir/$hap.len > $dir/$hap.bed]);
+        $self->cmd(qq[cut -f1 $dir/$hap.bed > $dir/$hap.list]);
+
+        $self->cmd(qq[$$self{bcftools} view -H -R $dir/$hap.bed $dir/changes.bcf | ] . q[awk -F "\t" '{print $4"\t"$5}' | awk '{lenA=length($1); lenB=length($2); if (lenA < lenB ) {sum+=lenB-lenA} else if ( lenA > lenB ) { sum+=lenA-lenB } else {sum+=lenA}} END {print sum}'] . qq[ > $dir/$hap.numvar]);
+
+        # TODO release tool select_column_matches or write something to do this here in runner pipeline
+        $self->cmd(qq[select_column_matches -m $dir/$hap.list $genomecov | ] . q[awk '{if ($2>3) {numbp+=$3}} END {print numbp}'] . qq[ - > $dir/$hap.numbp]);
+
+        my $bp = `cat $dir/$hap.numbp`;
+        my $var = `cat $dir/$hap.numvar`;
+        my $qv = -10*log($var/$bp)/log(10);
+        $self->cmd(qq[echo $qv > $dir/$hap.qv]);
+    }
+
+    $self->cmd("touch $outfile");
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!");
+    open(my $oh,'>',"$$self{outdir}/chunks/merge.list") or $self->throw("$$self{outdir}/chunks/merge.list: $!");
+    my %groups;
+    my $gid = 0;
+    while (my $line=<$fh>)
+    {
+        $gid = $gid % $$self{group_size};
+        my ($chr,$end,undef) = split(/\t/,$line);
+        my $chr_no_pipe = $chr;
+        $chr_no_pipe =~ s/[:\|]/_/g;
+        push @{$groups{$gid}}, { chr=>$chr, beg=>0, end=>$end, file => "$$self{outdir}/chunks/$gid/$chr_no_pipe.bcf" };
+        print $oh "$$self{outdir}/chunks/$gid/$chr_no_pipe.bcf\n";
+        $gid++;
+    }
+    close($fh);
+    close($oh);
+
+    if ( !(keys %groups) ) { $self->throw("No sequences read from $fai??"); }
+    return \%groups;
+}
+
+sub index_part
+{
+    my ($self,$vcf,$threads) = @_;
+    my $cmd = "$$self{bcftools} index -f";
+    $cmd .= " --threads $threads" if (defined $threads && $threads);
+    $self->cmd("$cmd $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
+}
+
+sub save_config
+{
+    my ($self) = @_;
+    my $src = exists $$self{_config} ? $$self{_config} : '';
+    my $dst = "$$self{outdir}/consensus.conf";
+    if ( -e $dst && $src && (stat($src))[9] <= (stat($dst))[9] ) { return; }
+    # if ( -e $dst && !$src) { return; }
+    if ( !-d $$self{outdir} ) { $self->cmd("mkdir -p $$self{outdir}"); }
+    open(my $fh,'>',$dst) or $self->throw("$dst: $!");
+    my $about = $$self{_about};
+    $about =~ s/\n/\n# /g;
+    print $fh "# $about";
+    close($fh);
+    $self->cmd("cat $src >> $dst") if $src;
+}
