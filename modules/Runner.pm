@@ -496,6 +496,19 @@ sub set_limits
     }
 }
 
+# Prepend explicit local directory prefix to prevent "do" statements searching @INC and leading
+# to warnings such as:
+#   do "out/.jobs/job.w.r.1.limits" failed, '.' is no longer in @INC; did you mean do "./out/.jobs/job.w.r.1.limits"
+sub _localize_path
+{
+    my ($self,$path) = @_;
+    if ( $path=~m{^/} ) { return $path; }
+    if ( $path=~m{^\./} ) { return $path; }
+    if ( $path=~m{^\.\./} ) { return $path; }
+    if ( $path=~m{^~/} ) { return $path; }
+    return "./$path";
+}
+
 # When revived, the user module can indirectly request increase of system
 # limits in the next run, see set_limits. This function is called just before
 # a job is submitted onto the farm.
@@ -504,6 +517,7 @@ sub _read_user_limits
     my ($self,$limits,$rfile,$id) = @_;
     my $limits_fname = "$rfile.$id.limits";
     if ( !-e $limits_fname ) { return; }
+    $limits_fname = $self->_localize_path($limits_fname);
     my $new_limits = do "$limits_fname";
     if ( $@ ) { $self->throw("do $limits_fname: $@\n"); }
     $self->inc_limits($limits, %$new_limits);
@@ -1409,6 +1423,7 @@ sub _revive
 
 	if ( defined $config_file )
 	{
+        $config_file = $self->_localize_path($config_file);
 		my %x = do "$config_file";
         if ( $@ ) { $self->throw("do $config_file: $@\n"); }
 		while (my ($key,$value) = each %x) { $$self{$key} = $value; }

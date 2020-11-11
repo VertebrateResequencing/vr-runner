@@ -3,7 +3,7 @@ package RunnerLSF;
 use strict;
 use warnings;
 use Carp;
-use DateTime;
+use POSIX;
 
 sub new
 {
@@ -125,7 +125,7 @@ sub init_jobs
     #   The last success counts, failures may be discarded in such a case.
     #
     open(my $fh, '<', $jids_file) or confess("$jids_file: $!");
-    my $path = $job_name; $path =~ s{/+}{/}g;   # ignore multiple dir separators (dir//file vs dir/file)
+    my $path = $job_name; $path =~ s{/+}{/}g; $path =~ s{^\./}{};  # ignore multiple dir separators (dir//file vs dir/file)
     my @jids = ();
     my @jid_lines = ();
     while (my $line=<$fh>)
@@ -135,6 +135,7 @@ sub init_jobs
         push @jids, $1;     # LSF array ID
         my $tmp = $2;
         $tmp =~ s{/+}{/}g;  # ignore multiple dir separators (dir//file vs dir/file)
+        $tmp =~ s{^\./}{};
         if ( $path ne $tmp ) { confess("$path ne $tmp\n"); }
     }
     close($fh) or confess("close failed: $jids_file");
@@ -253,6 +254,20 @@ sub init_jobs
     return \@jobs_out;
 }
 
+sub date_to_time
+{
+    my (%t) = @_;
+    # mktime arguments: sec, min, hour, mday, mon, year, wday = 0, yday = 0, isdst = -1
+    return POSIX::mktime(0,$t{minute},$t{hour},$t{day},$t{month}-1,$t{year}-1900);
+
+
+    #my $x = POSIX::mktime(0,$t{minute},$t{hour},$t{day},$t{month}-1,$t{year}-1900);
+    #my $y = POSIX::ctime($x);
+    #print STDERR "$t{minute} $t{hour} $t{day} $t{month} $t{year}\n";
+    #print STDERR "$y\n";
+    #exit;
+}
+
 sub _parse_bjobs_l
 {
     my ($self,$debug_lsf_output) = @_;
@@ -350,22 +365,22 @@ sub _parse_bjobs_l
         # Fri Nov 15 00:55:36: Started 1 Task(s) on Host(s) <bc-25-1-08>, Allocated 1 Slo
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started on/i ) 
         {
-            $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
+            $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.+ dispatched to/ )    # associated with underrun status
         {
-            $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
+            $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started \d+ task/i ) 
         {
-            $$job{started} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch;
+            $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
 
         # Tue Mar 19 13:58:23: Resource usage collected...
         elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ ) 
         {
             if ( !exists($$job{started}) ) { confess("Could not parse the `bjobs -l` output for the job $$job{lsf_id}\nThe current line:\n\t$lines[$i]\nThe complete output:\n", @lines); }
-            $$job{wall_time} = DateTime->new(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year)->epoch - $$job{started};
+            $$job{wall_time} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year) - $$job{started};
             if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $$job{wall_time} ) { $$job{cpu_time} = $$job{wall_time}; }
         }
         if ( $lines[$i]=~/The CPU time used is (\d+) seconds./ ) 
