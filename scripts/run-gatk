@@ -1,0 +1,248 @@
+#!/usr/bin/env perl
+#
+# Author: petr.danecek@sanger
+#
+
+use strict;
+use warnings;
+use Carp;
+
+my $runner = myRunner->new();
+$runner->run();
+
+exit;
+
+#--------------------------------
+
+package myRunner;
+use base qw(Runner);
+use strict;
+use warnings;
+
+sub new
+{
+    my ($class,@args) = @_;
+    my $self = $class->SUPER::new(@args);
+
+    $$self{config_version} = '1427807557';
+    $$self{chunk_size} = 10_000_000;
+    $$self{gatk}       = 'java -Xms500m -Xmx500m -jar gatk.jar HaplotypeCaller';
+    $$self{limits}    = { runtime=>24*60, memory=>5_000 };
+    $$self{do_clean}  = 1;
+    $$self{verbose}   = 1;
+
+    $$self{_sampleconf} = q[
+            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            #  config file to get rid of the warnings.
+            version  => '] .$$self{config_version}. q[',
+
+            chunk_size => '] .$$self{chunk_size}.  q[',
+            gatk       => '] .$$self{gatk}.  q[',
+            fasta      => undef,
+            bam        => undef,
+            bam_list   => undef,
+            regions    => undef,    # e.g. [ qw(11 20) ]
+
+            limits     => { runtime=>24*60, memory=>10_000 },
+            do_clean   => 1,
+    ]."\n";
+
+
+    $$self{usage} .= 
+        "About: Run GATK haplotype caller\n" .
+        "Usage: run-gatk\n" .
+        "Options:\n" .
+        "   -b, --bam <file>        \n" .
+        "   -B, --bam-list <file>   \n" .
+        "   -f, --fasta <file>      \n" .
+        "   -o, --outdir <dir>      \n" .
+        "   -r, --regions <file>    \n" .
+        "\n";
+
+    return $self;
+}
+
+sub parse_args
+{
+    my ($self) = @_;
+    while (defined(my $arg=shift(@ARGV)))
+    {
+        if ( $arg eq '-b' or $arg eq '--bam' ) { $$self{bam}=shift(@ARGV); next; }
+        if ( $arg eq '-B' or $arg eq '--bam-list' ) { $$self{bam_list}=shift(@ARGV); next; }
+        if ( $arg eq '-f' or $arg eq '--fasta' ) { $$self{fasta}=shift(@ARGV); next; }
+        if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--regions' ) { $$self{regions}=shift(@ARGV); next; }
+        $self->throw();
+    }
+    if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
+    if ( !defined($$self{bam}) and !defined($$self{bam_list}) ) { $self->throw("Expected the -b or -B option."); }
+    if ( !defined($$self{fasta}) ) { $self->throw("Expected the -f option."); }
+}
+
+sub main
+{
+    my ($self) = @_;
+    $self->parse_args();
+    if ( $self->is_finished("$$self{outdir}/all_done") ) { $self->all_done; }
+
+    my $chunks = $self->init_chunks();
+    if ( !@$chunks ) { $self->throw("No chunks to run?\n"); }
+
+    $self->set_limits(%{$$self{limits}}) unless !defined($$self{limits});
+
+    # chunks:
+    #   - chr
+    #   - beg
+    #   - end
+    #   + file .. full path
+    for my $chunk (@$chunks)
+    {
+        my $outfile = "$$self{outdir}/chunks/$$chunk{chr}-$$chunk{beg}-$$chunk{end}.bcf";
+        $$chunk{file} = $outfile;
+        $self->spawn('run_gatk',$outfile,$chunk);
+    }
+    $self->wait;
+
+    $self->spawn('merge',"$$self{outdir}/merged.bcf",$chunks);
+    $self->wait;
+
+    $self->clean();
+    $self->cmd("touch $$self{outdir}/all_done");
+    $self->all_done;
+}
+
+sub clean
+{
+    my ($self,$chunks) = @_;
+    if ( !$$self{do_clean} )  { return; }
+    $self->SUPER::clean($$self{outdir});
+    $self->cmd("rm -rf $$self{outdir}/chunks");
+}
+
+sub init_chunks
+{
+    my ($self) = @_;
+
+    my $regions = [];
+    if ( !exists($$self{regions}) or !defined($$self{regions}) )
+    {
+        my $chrs = $self->read_fai("$$self{fasta}.fai");
+        for my $chr (sort keys %$chrs) { push @$regions, { chr=>$chr, beg=>1, end=>$$chrs{$chr} }; }
+    }
+    elsif ( ref($$self{regions}) eq 'ARRAY' )
+    {
+        my $lengths;
+        for my $reg (@{$$self{regions}})
+        {
+            my ($chr,$start,$end);
+            if ( $reg=~/^([^:]+):+([^-]+)-(.+)$/ ) { $chr=$1; $start=$2; $end=$3; }
+            elsif ( $reg=~/^([^:]+)$/ )
+            {
+                $chr = $1;  
+                if ( !defined $lengths ) { $lengths = $self->read_fai("$$self{fasta}.fai"); }
+                if ( !exists($$lengths{$chr}) ) { $self->throw("Chromosome \"$chr\" not in $$self{fasta}.fai?"); }
+                $start = 1;
+                $end = $$lengths{$chr};
+            }
+            else { $self->throw("Could not parse the region: $reg\n"); }
+            push @$regions, { chr=>$chr, beg=>$start, end=>$end };
+        }
+    }
+    else
+    {
+        $regions = $self->read_regions($$self{regions});
+    }
+
+    my @chunks;
+    for my $region (@$regions)
+    {
+        my $pos     = $$region{beg};
+        my $end_pos = $$region{end};
+        while ($pos<$end_pos)
+        {
+            my $beg = $pos;
+            my $end = $beg + $$self{chunk_size}-1;
+            if ( $end > $end_pos ) { $end = $end_pos; }
+
+            push @chunks, { chr=>$$region{chr}, beg=>$beg, end=>$end };
+
+            $pos += $$self{chunk_size};
+            if ( $pos<1 ) { $self->throw("The split size too small [$$self{chunk_size}]?\n"); }
+
+            if ( $$self{debug_chunks} && scalar @chunks>=$$self{debug_chunks} ) { return \@chunks; }
+        }
+    }
+
+    return \@chunks;
+}
+
+sub read_regions
+{
+    my ($self,$file) = @_;
+    open(my $fh,'<',$file) or $self->throw("$file: $!"); 
+    my @regions;
+    while (my $line=<$fh>)
+    {
+        chomp($line);
+        if ( !($line=~/^(\S+)\s+(\d+)\s+(\d+)\s*$/) ) { $self->throw("Could not parse the regions file $file: [$line]"); }
+        push @regions, { chr=>$1, beg=>$2, end=>$3 };
+    }
+    return \@regions;
+}
+
+sub read_fai
+{
+    my ($self,$fai) = @_;
+
+    # Determine the chromosomes and their lengths
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    my %chr_lengths;
+    while (my $line=<$fh>)
+    {
+        my @items = split(/\s+/,$line);
+        my $chr = $items[0];
+        my $len = $items[1];
+        $chr_lengths{$chr} = $len;
+    }
+    close($fh);
+    if ( !scalar keys %chr_lengths ) { $self->throw("No sequences read from $fai??"); }
+    return \%chr_lengths;
+}
+
+
+sub index_part
+{
+    my ($self,$vcf) = @_;
+    $self->cmd("bcftools index -f $vcf.part");
+    my $suffix = 'csi';
+    rename("$vcf.part.$suffix","$vcf.$suffix") or $self->throw("rename $vcf.part.$suffix $vcf.$suffix: $!");
+    rename("$vcf.part",$vcf) or $self->throw("rename $vcf.part $vcf: $!");
+}
+
+sub merge
+{
+    my ($self,$outfile,$chunks) = @_;
+    open(my $fh,'>',"$outfile.list") or $self->throw();
+    for my $chunk (@$chunks)
+    {
+        print $fh "$$chunk{file}\n";
+    }
+    close($fh) or $self->throw("close failed: $!");
+
+    $self->cmd("bcftools concat -f $outfile.list -Ou | bcftools view -e'type=\"ref\"' -Ou | bcftools sort -Ou -T $outfile.tmp.XXXXXX | bcftools norm -f $$self{fasta} -Ob -o $outfile.part");
+
+    $self->index_part($outfile);
+}
+
+sub run_gatk
+{
+    my ($self,$outfile,$chunk) = @_;
+    my @bam = ();
+    if ( defined($$self{bam}) ) { push @bam,"-I $$self{bam}"; }
+    if ( defined($$self{bam_list}) ) { push @bam,"-I $$self{bam_list}"; }
+    my $bam = join(' ',@bam);
+    my $cmd = "$$self{gatk} -R $$self{fasta} $bam -L $$chunk{chr}:$$chunk{beg}-$$chunk{end} -O $outfile.part.vcf.gz && bcftools view -Ob -o $outfile.part $outfile.part.vcf.gz && rm -f $outfile.part.vcf.gz*";
+    $self->cmd($cmd,verbose=>1);
+    $self->index_part($outfile);
+}
+
