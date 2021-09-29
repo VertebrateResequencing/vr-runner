@@ -25,7 +25,7 @@ sub new
     my $self = $class->SUPER::new(@args);
 
     $$self{verbose} = 1;
-    $$self{samtools} = 'samtools-1.3';
+    $$self{samtools} = 'samtools';
     $$self{limits}   = { memory=>5_000 };
     $$self{config_version} = '1427807557';
     $$self{_sampleconf} = q[
@@ -107,7 +107,7 @@ sub main
             my $fname   = "$$self{outdir}/fastq/$$file{name}";
             $$file{out} = "$fname.1.fastq.gz,$fname.2.fastq.gz";
             push @list,"$fname.1.fastq.gz,$fname.2.fastq.gz";
-            $self->spawn('bam2fq',"$fname.1.fastq.gz","$fname.2.fastq.gz","$fname.0.fastq.gz",$file);
+            $self->spawn('bam2fq',"$fname.1.fastq.gz","$fname.2.fastq.gz","$fname.0.fastq.gz","$fname.s.fastq.gz",$file);
         }
         $self->wait;
         $self->save_list("$$self{outdir}/fastq.list",\@list);
@@ -181,7 +181,7 @@ sub unique_name
 sub sort_bam
 {
     my ($self,$outfile,$file) = @_;
-    $self->cmd("mkdir -p $outfile.tmp");
+    $self->cmd("rm -rf $outfile.tmp && mkdir -p $outfile.tmp");
 
     # proper sort or faster collate:
     #    $self->cmd("$$self{samtools} sort -n $$file{src} -O bam -o $outfile.part -T $outfile.tmp/tmp");
@@ -193,9 +193,18 @@ sub sort_bam
 
 sub bam2fq
 {
-    my ($self,$outfile,$out2,$out0,$file) = @_;
-    $self->cmd("$$self{samtools} collate -Ou $$file{src} $outfile.tmp | $$self{samtools} bam2fq -F0xf00 -1 $outfile.part -2 $out2 -0 $out0 -");
-    rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
+    my ($self,$outfile,$out2,$out0,$out_s,$file) = @_;
+    my $tmp = $outfile=~/\.gz$/ ? "$outfile.part.gz" : "$outfile.part";
+    $self->cmd("rm -rf $outfile.tmp.*");
+    $self->cmd("$$self{samtools} collate -Ou $$file{src} $outfile.tmp | $$self{samtools} bam2fq -F0xf00 -1 $tmp -2 $out2 -0 $out0 -s $out_s -n -");
+
+    # check sanity
+    my $cat = $outfile=~/\.gz$/ ? 'gunzip -c' : 'cat';
+    my $n1  = (grep {chomp} $self->cmd("$cat $tmp  | wc -l"))[0];
+    my $n2  = (grep {chomp} $self->cmd("$cat $out2 | wc -l"))[0];
+    if ( $n1 ne $n2 ) { $self->throw("Different number of lines in $tmp and $out2\n"); }
+
+    rename($tmp,$outfile) or $self->throw("rename $tmp $outfile: $!");
 }
 
 sub bam2fastq
