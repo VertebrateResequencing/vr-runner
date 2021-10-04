@@ -28,7 +28,7 @@ sub new
     $$self{reads_per_chunk} = 100_000;
     $$self{samtools} = 'samtools';
     $$self{bwa}      = 'bwa';
-    $$self{picard}   = 'java -Xms5G -Xmx5G -jar ~/lib/picard-1.135.jar MarkDuplicates VALIDATION_STRINGENCY=SILENT';
+    $$self{picard}   = 'java -Xms5G -Xmx5G -jar ~/lib/picard-1.135.jar MarkDuplicates -VALIDATION_STRINGENCY SILENT';
     $$self{bwa_mem}  = 1;
     $$self{merge}    = 0;
     $$self{rmdup}    = 0;
@@ -296,7 +296,17 @@ sub main
         my $mem = $self->get_java_limits($$self{picard});
         if ( defined $mem ) { $self->set_limits(memory=>$mem*1.15); }
 
-        $self->spawn('rmdup',"$$self{outdir}/merged.rmdup.bam","$$self{outdir}/merged.bam");
+        if ( $$self{merge} )
+        {
+            $self->spawn('rmdup',"$$self{outdir}/merged.rmdup.bam","$$self{outdir}/merged.bam");
+        }
+        else
+        {
+            for my $file (@files)
+            {
+                $self->spawn('rmdup',"$$self{outdir}/rmdup/$$file{prefix}.bam","$$self{outdir}/bams/$$file{prefix}.bam");
+            }
+        }
         $self->wait;
     }
 
@@ -880,7 +890,7 @@ sub merge
 sub rmdup
 {
     my ($self,$outfile,$bam) = @_;
-    $self->cmd("$$self{picard} I=$bam O=$outfile.part M=$outfile.txt",java_err_file=>"$outfile.java");
+    $self->cmd("$$self{picard} -I $bam -O $outfile.part -M $outfile.txt",java_err_file=>"$outfile.java");
     $self->cmd("$$self{samtools} index $outfile.part");
     rename("$outfile.part.bai","$outfile.bai") or $self->throw("rename $outfile.part.bai $outfile.bai: $!");
     rename("$outfile.part",$outfile) or $self->throw("rename $outfile.part $outfile: $!");
