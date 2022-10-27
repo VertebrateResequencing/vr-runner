@@ -20,20 +20,20 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
     #!/usr/bin/env perl
     use strict;
     use warnings;
-    
+
     # Create new runner object and run it
     my $runner = myRunner->new();
     $runner->run();
-    
+
     exit;
-    
+
     #------------------------
-    
+
     package myRunner;
     use base qw(Runner);
     use strict;
     use warnings;
-    
+
     # The user must define at least this method
     sub main
     {
@@ -42,7 +42,7 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
         # This simple pipeline has two steps. In the first step, two groups
         # of empty files are created - Hello.[123] and Hello.[abc]. This is
         # not really useful for anything else other than demonstrate how to
-        # run jobs in parallel and how to allow groups of jobs proceed 
+        # run jobs in parallel and how to allow groups of jobs proceed
         # independently.
         # Jobs in one group take longer to run, they contain a 60 seconds sleep
         # interval. Both groups are run independently and synchronized at the end.
@@ -87,11 +87,11 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
         $self->all_done;
     }
 
-    # Create an empty file    
+    # Create an empty file
     sub touch
     {
         my ($self,$output_file,%params) = @_;
-   
+
         # Pretend there is some computation lasting a few seconds
         sleep($params{sleep});
 
@@ -100,17 +100,17 @@ Runner.pm   - A simple module for quick development of scripts and pipelines whi
 
     # Write time stamps (mtime) into a file
     sub group
-    {   
+    {
         my ($self,$output_file,$files) = @_;
         open(my $fh,'>',"$output_file.part") or $self->throw("$output_file.part: $!");
-        for my $file (@$files) 
-        {   
+        for my $file (@$files)
+        {
             my $mtime = (stat($file))[9];
             print $fh "$mtime\t$file\n";
         }
         close($fh) or $self->throw("close failed: $output_file.part");
         rename("$output_file.part",$output_file) or $self->throw("rename $output_file.part $output_file: $!");
-    }   
+    }
 
     sub new
     {
@@ -146,7 +146,7 @@ sub new
     $$self{_nretries} = 1;
     $$self{_verbose} = 1;
     $$self{_maxjobs} = 100;
-    $$self{usage} = 
+    $$self{usage} =
         "Runner.pm arguments:\n" .
         "   +help                   Summary of commands\n" .
         "   +config <file>          Configuration file\n" .
@@ -172,7 +172,7 @@ sub new
 =head2 run
 
     About : The main runner method which parses runner's command line parameters and calls the main() method defined by the user.
-    Args  : The system command line options are prefixed by "+" to distinguish from user-module options and must come first, before the user-module options 
+    Args  : The system command line options are prefixed by "+" to distinguish from user-module options and must come first, before the user-module options
                 +config <file>
                     Optional configuration file for overriding defaults
                 +debug <file1> <file2>
@@ -215,7 +215,7 @@ sub new
                     Print the content of the freezed object created by spawn
                 +silent
                     Decrease verbosity of the Runner module
-                
+
 =cut
 
 sub run
@@ -236,11 +236,11 @@ sub run
         if ( $arg eq '+loop' ) { $$self{_loop}=shift(@ARGV); next; }
         if ( $arg eq '+lock' ) { $$self{_lock}=shift(@ARGV); next; }
         if ( $arg eq '+kill' ) { $$self{_kill_jobs}=1; next; }
-        if ( $arg eq '+maxjobs' ) 
-        { 
-            $$self{_maxjobs}=shift(@ARGV); 
+        if ( $arg eq '+maxjobs' )
+        {
+            $$self{_maxjobs}=shift(@ARGV);
             if ( !($$self{_maxjobs}=~/^\d+$/) ) { $self->throw("Expected integer value with +maxjobs, got \"$$self{_maxjobs}\"\n"); }
-            next; 
+            next;
         }
         if ( $arg eq '+mail' ) { $$self{_mail}=shift(@ARGV); next; }
         if ( $arg eq '+nocache' ) { $$self{_nocache}=1; next; }
@@ -248,26 +248,26 @@ sub run
         if ( $arg eq '+retries' ) { $$self{_nretries}=shift(@ARGV); next; }
         if ( $arg eq '+verbose' ) { $$self{_verbose}=1; next; }
         if ( $arg eq '+silent' ) { $$self{_verbose}=0; next; }
-        if ( $arg eq '+js' ) 
-        { 
-            $$self{_farm}=shift(@ARGV); 
+        if ( $arg eq '+js' )
+        {
+            $$self{_farm}=shift(@ARGV);
             if ( lc($$self{_farm}) eq 'lsf' ) { $$self{_farm} = 'LSF'; }
             elsif ( lc($$self{_farm}) eq 'lsf-cr' ) { $$self{_farm} = 'LSFCR'; }
             elsif ( lc($$self{_farm}) eq 'lsfcr' ) { $$self{_farm} = 'LSFCR'; }
             elsif ( lc($$self{_farm}) eq 'mpm' ) { $$self{_farm} = 'MPM'; }
             elsif ( lc($$self{_farm}) eq 'slurm' ) { $$self{_farm} = 'SLURM'; }
-            next; 
+            next;
         }
         if ( $arg eq '+local' ) { $$self{_run_locally}=1; next; }
-        if ( $arg eq '+show' ) 
-        { 
+        if ( $arg eq '+show' )
+        {
             $arg = shift(@ARGV);
-            my $obj = retrieve($arg); 
+            my $obj = retrieve($arg);
             print Dumper($obj);
             exit;
         }
-        if ( $arg eq '+run' ) 
-        { 
+        if ( $arg eq '+run' )
+        {
             my $run_file = shift(@ARGV);
             my $job_id   = shift(@ARGV);
             if ( $job_id eq '--' )
@@ -280,8 +280,8 @@ sub run
             }
             exit;
         }
-        if ( $arg eq '+debug' ) 
-        { 
+        if ( $arg eq '+debug' )
+        {
             my $file1 = shift(@ARGV);
 			my $file2 = shift(@ARGV);
             $self->_revive($file1,$file2);
@@ -315,17 +315,17 @@ sub run
         }
         wait();
         my $status = $?>>8;
-        if ( $status ) 
+        if ( $status )
         {
             $self->remove_lock();
             if ( $status==$$self{_status_codes}{DONE} ) { exit $status; }
             # Exit with the correct status immediately if the user module fails. Note that +retries applies only to spawned jobs.
-            die "\n"; 
+            die "\n";
         }
         if ( !$$self{_loop} or $$self{_loop}<0 )
-        { 
+        {
             $self->remove_lock();
-            return; 
+            return;
         }
         $self->debugln($$self{_about}._timestamp(), "sleeping for $$self{_loop} seconds...");
         sleep($$self{_loop});
@@ -401,8 +401,8 @@ sub _read_config
     if ( $@ ) { $self->throw("eval $config: $@\n"); }
     while (my ($key,$value) = each %$x)
     {
-        if ( !ref($value) ) 
-        { 
+        if ( !ref($value) )
+        {
             $$self{$key} = $value;
             next;
         }
@@ -439,7 +439,7 @@ sub _sample_config
     Usage : $self->set_temp_dir('/path/to/directory');
     Args  : <dir>
                 Directory name
-                
+
 =cut
 
 sub set_temp_dir
@@ -460,6 +460,10 @@ sub set_temp_dir
                 The maximum number of jobs that can be submitted at once
             <memory>
                 Expected memory requirements [MB] or undef to unset
+            <nocache>
+                Force check that output files exist, do not rely on cached data,
+                e.g. nocache=>1 or nocache=>0. Has the same effect as providing
+                +nocache on the command line for a fragment of code
             <runtime>
                 Expected running time [minutes] or undef to unset
             <queues>
@@ -472,7 +476,7 @@ sub set_temp_dir
                 +loop overrides this value.
 
             Plus any job-scheduler specific options
-                
+
 =cut
 
 sub set_limits
@@ -494,6 +498,7 @@ sub set_limits
 
         $self->_write_user_limits($$self{_farm_options}, $$self{_revived_file}, $$self{_revived_job});
     }
+    if ( exists($args{nocache}) ) { $$self{_nocache} = $args{nocache}; }
 }
 
 # Prepend explicit local directory prefix to prevent "do" statements searching @INC and leading
@@ -541,9 +546,9 @@ sub _write_user_limits
     Usage : $self->inc_limits(memory=>10_000);
             $self->inc_limits($dst, memory=>10_000);
     Args  : See set_limits for details. Note that if the first argument is
-            a hashref, this will be updated, otherwise system-wide limits 
+            a hashref, this will be updated, otherwise system-wide limits
             are set.
-                
+
 =cut
 
 sub inc_limits
@@ -552,8 +557,8 @@ sub inc_limits
     if ( !scalar @params ) { return; }
     my $dst  = undef;
     my %args = ();
-    if ( ref($params[0]) eq 'HASH' ) 
-    { 
+    if ( ref($params[0]) eq 'HASH' )
+    {
         $dst  = shift(@params);
         %args = @params;
     }
@@ -565,8 +570,8 @@ sub inc_limits
     for my $key (keys %args)
     {
         if ( !defined($args{$key}) ) { next; }
-        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} ) 
-        { 
+        if ( !exists($$dst{$key}) or !defined($$dst{$key}) or $$dst{$key}<$args{$key} )
+        {
             $$dst{$key} = $args{$key};
         }
     }
@@ -577,7 +582,7 @@ sub inc_limits
     About : get limits set for computing farm
     Usage : $self->get_limits('memory');
     Args  : See set_limits
-                
+
 =cut
 
 sub get_limits
@@ -634,12 +639,12 @@ sub _freeze
 =head2 spawn
 
     About : Schedule a job for execution. When +maxjobs limit is exceeded, the runner will exit via self->wait call.
-                When the job fails too many times (controllable by the +retries option), the pipeline exists. With 
+                When the job fails too many times (controllable by the +retries option), the pipeline exists. With
                 negative value of +retries, a skip file '.s' is created and the job is reported as finished.
-                The skip files are cleaned automatically when +retries is set to a positive value. A non cleanable 
-                variant is force skip '.fs' file which is never cleaned by the pipeline and is created/removed 
+                The skip files are cleaned automatically when +retries is set to a positive value. A non cleanable
+                variant is force skip '.fs' file which is never cleaned by the pipeline and is created/removed
                 manually by the user. When 'fs' is cleaned by the user, the pipeline must be run with +nocache
-                in order to notice the change. 
+                in order to notice the change.
                 Note that 'spawn' only schedules the tasks and the jobs are submitted to the farm by the 'wait' call.
 
                 Important: the caller must ensure that jobs are spawned in the same order, make sure when a sort
@@ -656,7 +661,7 @@ sub _freeze
                 Arbitrary number of parameters to be passed to the method. Note that these
                 are stored by Storable and thus the same limitations apply. Passing for example,
                 complex objects with CODE refs will not work.
-                
+
 =cut
 
 sub spawn
@@ -701,7 +706,7 @@ sub _is_marked_as_finished
                 chomp($line);
                 if ( !($line=~/^([01sf])\t(\d+)\t(.*)$/) ) { $self->throw("Could not parse $wfile: $line\n"); }
                 my $done = $1;
-                my $id   = $2;  
+                my $id   = $2;
                 my $file = $3;
                 $$self{_jobs_db}{$wfile}{$file}{finished} = $done;
                 $$self{_jobs_db}{$wfile}{$file}{wfile}    = $wfile;
@@ -729,23 +734,24 @@ sub _is_marked_as_finished
     my $fsfile = "$wfile.$$self{_jobs_db}{$wfile}{$done_file}{id}.fs";
 
     # If skip file exists and +retries >0, the skip file will be deleted
-    if ( $$self{_nretries}>0 && $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 's' ) 
-    { 
-        $$self{_jobs_db}{$wfile}{$done_file}{finished} = 0; 
+    if ( $$self{_nretries}>0 && $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 's' )
+    {
+        $$self{_jobs_db}{$wfile}{$done_file}{finished} = 0;
         $is_dirty = 1;
     }
-    if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} ) 
-    { 
+    if ( $$self{_nocache} && !-e $done_file ) { $$self{_jobs_db}{$wfile}{$done_file}{finished} = 0; }
+    if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} )
+    {
         if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 'f' ) { $self->debugln("Skipping the job upon request, a force skip file exists: $fsfile"); }
         if ( $$self{_jobs_db}{$wfile}{$done_file}{finished} eq 's' ) { $self->debugln("Skipping the job, a skip file exists: $sfile"); }
         return 2;
     }
 
     # Stat on non-existing files is cheap
-    if ( $self->is_finished($done_file) ) 
-    { 
+    if ( $self->is_finished($done_file) )
+    {
         $is_dirty = 1;
-        $is_done  = 1; 
+        $is_done  = 1;
     }
     # If the file needs to be skipped, then skip it by reporting that it's done even if it is not
     elsif ( -e $fsfile )
@@ -758,10 +764,10 @@ sub _is_marked_as_finished
     elsif ( -e $sfile )
     {
         # This is currently the only way to clean the skip files: run with +retries set to positive value
-        if ( $$self{_nretries}<0 ) 
-        { 
+        if ( $$self{_nretries}<0 )
+        {
             $self->debugln("Skipping the job, a skip file exists: $sfile");
-            $is_done = 's'; 
+            $is_done = 's';
         }
         else
         {
@@ -793,15 +799,15 @@ sub _mark_as_finished
         my $all_done  = 1;
         for my $job (sort {$$a{id}<=>$$b{id}} values %{$$self{_jobs_db}{$wfile}})
         {
-            print $fh "$$job{finished}\t$$job{id}\t$$job{dfile}\n"; 
+            print $fh "$$job{finished}\t$$job{id}\t$$job{dfile}\n";
             if ( $$job{finished} ) { push @clean_ids, $$job{id}; }
             else { $all_done = 0; }
         }
         close($fh) or $self->throw("Failed to close $wfile.part");
-        if ( $$self{_js} ) 
-        { 
+        if ( $$self{_js} )
+        {
             # Clean all jobs associated with this wfile
-            $$self{_js}->clean_jobs($wfile,\@clean_ids,$all_done); 
+            $$self{_js}->clean_jobs($wfile,\@clean_ids,$all_done);
         }
         rename("$wfile.part",$wfile) or $self->throw("rename $wfile.part $wfile: $!");
     }
@@ -862,9 +868,9 @@ sub _get_unfinished_jobs
             else
             {
                 my $id = $$self{_jobs_db}{$wfile}{$$job{done_file}}{id};
-                if ( exists($wfiles{$wfile}{$id}) ) 
-                { 
-                    $self->throw("The target file name is not unique: $$job{done_file}\n",Dumper($wfiles{$wfile}{$id}{args},$$job{args})); 
+                if ( exists($wfiles{$wfile}{$id}) )
+                {
+                    $self->throw("The target file name is not unique: $$job{done_file}\n",Dumper($wfiles{$wfile}{$id}{args},$$job{args}));
                 }
                 if ( $nprn_pend < 2 ) { $self->debugln("\tx  $$job{done_file} .. unfinished"); $nprn_pend++; }
                 elsif ( $nprn_pend < 3 ) { $self->debugln("\tx  ...etc..."); $nprn_pend++; }
@@ -908,7 +914,7 @@ sub _init_scheduler
     if ( !$$self{_run_locally} && !$$self{_js} )
     {
         my $farm = 'Runner' . $$self{_farm};
-        eval 
+        eval
         {
             require "$farm.pm";
             $$self{_js} = $farm->new();
@@ -920,11 +926,11 @@ sub _init_scheduler
 
 =head2 wait
 
-    About : Checkpoint, submit the jobs scheduled by 'spawn' to the farm and wait for all tasks to finish. 
+    About : Checkpoint, submit the jobs scheduled by 'spawn' to the farm and wait for all tasks to finish.
             Important: the caller must ensure that jobs were spawned in the same order, make sure when a sort
             statement is included when iterating over hash keys:
                 for $job (sort keys %jobs) { spawn('method',"outfile.$job"); }
-    Usage : $self->spawn("method",$done_file1,@params1); 
+    Usage : $self->spawn("method",$done_file1,@params1);
             $self->spawn("method",$done_file2,@params2);
             $self->wait();
     Args  : <none>
@@ -965,12 +971,12 @@ sub wait
             for my $grp (keys %{$args[0]})
             {
                 my %unique = ();
-                for my $job (@{$args[0]{$grp}}) 
-                { 
+                for my $job (@{$args[0]{$grp}})
+                {
                     $job =~ s{/+}{/}g;
                     if ( exists($unique{$job}) ) { next; }
                     $unique{$job} = 1;
-                    push @{$$job2grp{$job}}, $grp; 
+                    push @{$$job2grp{$job}}, $grp;
                 }
             }
         }
@@ -984,10 +990,10 @@ sub wait
     # First check the files passed to wait() explicitly
     for my $file (@extra_files)
     {
-        if ( ! $self->is_finished($file) ) 
-        { 
+        if ( ! $self->is_finished($file) )
+        {
             $self->debugln("The file not finished: $file");
-            exit; 
+            exit;
         }
     }
     if ( !exists($$self{_checkpoints}) or !scalar @{$$self{_checkpoints}} ) { return {}; }
@@ -997,10 +1003,10 @@ sub wait
     my ($jobs,$finished_jobs) = $self->_get_unfinished_jobs($job2grp);
 
     if ( !scalar keys %$job2grp ) { $$self{_checkpoints} = []; }
-    if ( !scalar keys %$jobs ) 
-    { 
+    if ( !scalar keys %$jobs )
+    {
         $self->debugln("\t-> done");
-        return $self->_group_finished_jobs($groups, $finished_jobs); 
+        return $self->_group_finished_jobs($groups, $finished_jobs);
     }
     my $n = 0;
     for my $wfile (keys %$jobs) { $n += scalar keys %{$$jobs{$wfile}}; }
@@ -1008,7 +1014,7 @@ sub wait
     $self->debugln("\t-> $n unfinished");
 
     # With '+local', the jobs will be run serially
-    if ( $$self{_run_locally} ) 
+    if ( $$self{_run_locally} )
     {
         for my $wfile (keys %$jobs)
         {
@@ -1031,15 +1037,15 @@ sub wait
     # Spawn to farm
     my $js = $$self{_js};
     if ( $$self{_loop} )
-    { 
-        $$self{_farm_options}{wakeup_interval} = abs($$self{_loop}); 
+    {
+        $$self{_farm_options}{wakeup_interval} = abs($$self{_loop});
         $js->set_limits(%{$$self{_farm_options}});
     }
 
     my $is_running = 0;
 
     # Each wfile corresponds to a single task group, each typically having multiple parallel jobs
-    for my $wfile (keys %$jobs)     
+    for my $wfile (keys %$jobs)
     {
         # unique id for this step and output directory
         my $prefix = $self->_get_temp_prefix($wfile);
@@ -1064,14 +1070,14 @@ sub wait
             }
 
             # If the job is already running, don't check for errors - these could be from previous run anyway.
-            if ( $js->job_running($task) ) 
-            { 
+            if ( $js->job_running($task) )
+            {
                 $must_run = 0;
                 $is_running++;
                 $is_wfile_running = 1;
                 if ( $$self{_kill_jobs} ) { $js->kill_job($task); next; }
             }
-        
+
             elsif ( $$self{_kill_jobs} ) { next; }
 
             # With very big arrays, it takes long time for is_marked_as_finished to complete
@@ -1082,14 +1088,14 @@ sub wait
                 if ( $$self{_nocache} && !$self->is_finished($done_file) ) { $must_run = 1; }
                 else
                 {
-                    $must_run = 0; 
+                    $must_run = 0;
                     $self->_add_to_finished_jobs($finished_jobs, $job2grp, $done_file);
                 }
             }
 
             # If the job has been already run and failed, check if it failed repeatedly
-            elsif ( $js->job_failed($task) ) 
-            { 
+            elsif ( $js->job_failed($task) )
+            {
                 my $nfailures = $js->job_nfailures($task);
                 if ( $nfailures > abs($$self{_nretries}) )
                 {
@@ -1103,7 +1109,7 @@ sub wait
                     }
                     else
                     {
-                        my $msg = 
+                        my $msg =
                             "The job failed repeatedly, ${nfailures}x: $wfile.$ids[$i].[eo]\n" .
                             "What next?\n" .
                             " - Look in the outputs and see what happened: $wfile.$ids[$i].[eo]\n" .
@@ -1130,7 +1136,7 @@ sub wait
                     $self->inc_limits(\%limits, memory=>$mem);
                 }
                 if ( exists($limits{RUNLIMIT}) )
-                { 
+                {
                     my $time = $limits{runtime}*1.5;
                     $self->inc_limits(\%limits, runtime=>$time);
                 }
@@ -1138,9 +1144,9 @@ sub wait
             }
 
             if ( $must_run )
-            { 
+            {
                 if ( $$self{_maxjobs} && $$self{_maxjobs}<$is_running ) { last; }
-                next; 
+                next;
             }
 
             splice(@ids, $i, 1);
@@ -1148,10 +1154,10 @@ sub wait
             $i--;
         }
         if ( $$self{_kill_jobs} ) { next; }
-        if ( !@ids ) 
-        { 
+        if ( !@ids )
+        {
             if ( !$is_wfile_running ) { $js->reset_step($prefix); }
-            next; 
+            next;
         }
         if ( $$self{_maxjobs} )
         {
@@ -1179,7 +1185,7 @@ sub wait
             for my $dir (keys %{$$cluster{dirs}}) { $self->_mkdir($dir); }
             for my $id (@{$$cluster{ids}}) { $self->_write_user_limits($$cluster{limits}, $rfile, $id); }
             my $ok;
-            eval 
+            eval
             {
                 $js->set_limits(%{$$cluster{limits}});
                 $js->run_jobs($prefix,$cmd,$$cluster{ids});
@@ -1325,7 +1331,7 @@ sub clean
             <array>
             <arrayref>
                 One or more groups to wait for
-                
+
 =cut
 
 sub group_done
@@ -1351,7 +1357,7 @@ sub group_done
     Usage : $self->is_finished('some/file');
     Args  : <file list>
                 The name of the file to check the existence of
-                
+
 =cut
 
 sub is_finished
@@ -1384,7 +1390,7 @@ sub _is_storable
 sub _revive_array
 {
     my ($self,$freeze_file,$job_id) = @_;
-    
+
     my $back;
     for (my $i=0; $i<3; $i++)
     {
@@ -1446,9 +1452,9 @@ sub _get_temp_prefix
     if ( !($fname=~m{([^/]+)$}) ) { $self->throw("FIXME: could not parse [$fname]\n"); }
     my $file = $1;
     my $dir  = $self->_get_temp_dir($fname);
-    if ( ! -d $dir ) 
-    { 
-        `mkdir -p $dir`; 
+    if ( ! -d $dir )
+    {
+        `mkdir -p $dir`;
         if ( $? ) { $self->throw("Cannot create directory [$dir]: $!"); }
     }
     return "$dir/$file";
@@ -1556,8 +1562,8 @@ sub _java_cmd_prep
 
     if ( -e $args{java_err_file} )
     {
-        `(cat $args{java_err_file}; echo;) >> $args{java_err_file}.prev`; 
-        unlink($args{java_err_file}); 
+        `(cat $args{java_err_file}; echo;) >> $args{java_err_file}.prev`;
+        unlink($args{java_err_file});
     }
     return "$cmd >$args{java_err_file} 2>&1";
 }
@@ -1588,11 +1594,11 @@ sub _java_cmd_err
 
 =head2 cmd
 
-    About : Executes a command via bash in the -o pipefail mode. 
+    About : Executes a command via bash in the -o pipefail mode.
     Args  : <string>
                 The command to be executed
             <hash>
-                Optional arguments: 
+                Optional arguments:
                 - exit_on_error     .. if set to 0, don't throw on errors. If not given, exit_on_error=1 is assumed
                 - java_err_file     .. temporary file used for increasing java limits
                 - memstep           .. increase memory by this amount if the java command fails [2000]
@@ -1620,14 +1626,14 @@ sub cmd
     if ( !defined $pid ) { $self->throw("Cannot fork: $!"); }
 
     my @out;
-    if ($pid) 
+    if ($pid)
     {
         # parent
         @out = <$kid_io>;
         close($kid_io);
-    } 
-    else 
-    {      
+    }
+    else
+    {
         # child
         exec('/bin/bash', '-o','pipefail','-c', $cmd) or $self->throw("Failed to run the command [/bin/sh -o pipefail -c $cmd]: $!");
     }
@@ -1636,10 +1642,10 @@ sub cmd
 
     my $exit_status = $?;
     my $status = exists($args{require_status}) ? $args{require_status} : 0;
-    if ( $status ne $exit_status ) 
+    if ( $status ne $exit_status )
     {
         if ( $args{java_err_file} ) { $self->_java_cmd_err($cmd,%args); }
-        
+
         my $msg;
         if ( $? & 0xff )
         {
@@ -1651,7 +1657,7 @@ sub cmd
         }
         $msg .= ":\n\t$cmd\n\n";
         if ( @out ) {  $msg .= join('',@out,"\n\n"); }
-        $self->throw($msg); 
+        $self->throw($msg);
     }
     return @out;
 }
@@ -1665,7 +1671,7 @@ sub cmd
     Args  : <string>
                 The command to be executed
             <hash>
-                Optional arguments: 
+                Optional arguments:
                 - exit_on_error     .. if set to 0, don't throw on errors. If not given, exit_on_error=1 is assumed
                 - require_status    .. throw if exit status is different [0]
                 - verbose           .. print command to STDERR before executing [0]
@@ -1682,8 +1688,8 @@ sub cmd3
 
     eval "require IPC::Run3";
     if ( $@ )
-    { 
-        $self->warn("Warning: IPC::Run3 is not available on this system, using Runner::cmd instead of Runner::cmd3\n"); 
+    {
+        $self->warn("Warning: IPC::Run3 is not available on this system, using Runner::cmd instead of Runner::cmd3\n");
         my @out = $self->cmd($cmd,%args);
         return (\@out,[]);
     }
@@ -1725,7 +1731,7 @@ sub cmd3
     if ( exists($args{exit_on_error}) && !$args{exit_on_error} ) { return (\@out,\@err); }
 
     my $require_status = exists($args{require_status}) ? $args{require_status} : 0;
-    if ( $status ne $require_status ) 
+    if ( $status ne $require_status )
     {
         my $msg;
         if ( $signal )
@@ -1738,7 +1744,7 @@ sub cmd3
         }
         $msg .= ":\n\t$cmd\n\n";
         if ( @out ) {  $msg .= join('',@out,"\n\n"); }
-        $self->throw($msg); 
+        $self->throw($msg);
     }
 
     return (\@out,\@err);
