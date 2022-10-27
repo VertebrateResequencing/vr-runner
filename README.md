@@ -23,7 +23,6 @@ The minimum commands sufficient to install and run the pipelines is:
     vim my.conf
     run-bt-mpileup +config my.conf +loop 600 -o outdir
 
-Important: see also the section about setting environment variables below!
 
 In more detail
 --------------
