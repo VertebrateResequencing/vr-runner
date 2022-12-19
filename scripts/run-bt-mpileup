@@ -37,7 +37,7 @@ sub new
     $$self{chunk_size}     = 1_000_000;
 	$$self{config_version} = '1427807557';
     $$self{_sampleconf} = q[
-            # For sanity checking that your config file is not obsolete. Update the version key in your 
+            # For sanity checking that your config file is not obsolete. Update the version key in your
             #  config file to get rid of the warnings.
             #
             # What changed since version:
@@ -49,7 +49,7 @@ sub new
             #
             version  => '] .$$self{config_version}. q[',
 
-            # Add -P ILLUMINA or -P SLX if the BAMs contain also reads from different platforms. 
+            # Add -P ILLUMINA or -P SLX if the BAMs contain also reads from different platforms.
             mpileup  => '] .$$self{mpileup}.  q[',
             call     => '] .$$self{call}. q[',
             norm     => '] .$$self{norm}. q[',
@@ -59,7 +59,7 @@ sub new
             filter   => '] .$$self{filter}. q[',
             concat   => '] .$$self{concat}. q[',
             htsfile  => '] .$$self{htsfile}. q[',
- 
+
             fa_ref   => 'human_g1k_v37.fasta',
 
             # Optional, for frameshift stats only
@@ -68,7 +68,7 @@ sub new
             # alns: A single bam/cram file, a list of bam/cram files in a file,
             # or a hash which defines the population structure.
             # When the "alns" key is not a hash, the samples are grouped by the
-            # @RG:SM tag from across all bams and called jointly. 
+            # @RG:SM tag from across all bams and called jointly.
             # Otherwise, the hash controls the sex, output sample names, and
             # samples/bams to be called jointly. The following columns are recognised:
             #   grp  .. group name. Files from the same group will be called jointly. If not given, samples are called jointly.
@@ -99,11 +99,11 @@ sub new
 
             # File or array with ploidy definitions in the format accepted by bcftools
             ploidy => undef,
-            
+
             limits   => { runtime=>24*60 },
     ]."\n";
 
-    $$self{usage} .= 
+    $$self{usage} .=
         "Usage: run-mpileup\n" .
         "Options:\n" .
         "   -c, --clean             Clean all temporary files (and do nothing else)\n" .
@@ -135,8 +135,8 @@ sub parse_args
 	}
     if ( !exists($$self{alns}) ) { $self->throw("The 'alns' config key is not present\n"); }
     if ( !exists($$self{fa_ref}) ) { $self->throw("The 'fa_ref' config key is not present\n"); }
-    if ( $$self{clean} ) 
-    { 
+    if ( $$self{clean} )
+    {
         $self->clean($$self{outdir});
         $self->all_done;
     }
@@ -211,7 +211,7 @@ sub main
             my @merge = ();
             for my $group (sort keys %$groups) { push @merge, "$outdir/$group.bcf"; }
             $self->spawn('merge_vcfs',"$outdir/merged/all.bcf",\@merge);
-            push @vcfs,@merge;
+            push @vcfs,"$outdir/merged/all.bcf";
         }
         else
         {
@@ -220,13 +220,12 @@ sub main
                 my @merge = ();
                 for my $group (sort keys %$groups) { push @merge, "$outdir/$group/$chr.bcf"; }
                 $self->spawn('merge_vcfs',"$outdir/merged/$chr.bcf",\@merge);
-                push @vcfs,@merge;
+                push @vcfs,"$outdir/merged/$chr.bcf";
             }
         }
         $self->wait;
     }
 
-    
     # Run summary stats
     for my $vcf (@vcfs)
     {
@@ -513,7 +512,7 @@ sub init_chunks
             if ( $reg=~/^([^:]+):+([^-]+)-(.+)$/ ) { $chr=$1; $start=$2; $end=$3; }
             elsif ( $reg=~/^([^:]+)$/ )
             {
-                $chr = $1;  
+                $chr = $1;
                 if ( !defined $lengths ) { $lengths = $self->read_fai("$$self{fa_ref}.fai"); }
                 if ( !exists($$lengths{$chr}) ) { $self->throw("Chromosome \"$chr\" not in $$self{fa_ref}.fai?"); }
                 $start = 1;
@@ -548,12 +547,12 @@ sub init_chunks
         }
     }
 
-    if ( $$self{shuffle_chunks} )
-    {
-        use Math::Random;
-        random_set_seed_from_phrase(1,1);
-        @chunks = random_permutation(@chunks);
-    }
+    # if ( $$self{shuffle_chunks} )
+    # {
+    #     use Math::Random;
+    #     random_set_seed_from_phrase(1,1);
+    #     @chunks = random_permutation(@chunks);
+    # }
 
     return \@chunks;
 }
@@ -561,7 +560,7 @@ sub init_chunks
 sub read_regions
 {
     my ($self,$file) = @_;
-    open(my $fh,'<',$file) or $self->throw("$file: $!"); 
+    open(my $fh,'<',$file) or $self->throw("$file: $!");
     my @regions;
     while (my $line=<$fh>)
     {
@@ -577,7 +576,7 @@ sub read_fai
     my ($self,$fai) = @_;
 
     # Determine the chromosomes and their lengths
-    open(my $fh,'<',$fai) or $self->throw("$fai: $!"); 
+    open(my $fh,'<',$fai) or $self->throw("$fai: $!");
     my %chr_lengths;
     while (my $line=<$fh>)
     {
@@ -655,7 +654,7 @@ sub debug_commands
     my $group  = (sort keys %$groups)[0];
     my $alns   = $$groups{$group}{alns};
 
-    my $cmd = 
+    my $cmd =
         "$$self{mpileup} -r $chr:$pos-$pos -b $alns -f $$self{fa_ref} -Ou |" .
         "$$self{call}";
 
@@ -677,7 +676,7 @@ sub merge_chunks
     my $cmd = "$$self{concat} -f $outfile.list";
     if ( exists($$self{filter}) && defined($$self{filter}) )
     {
-        $cmd .= " -Ou | $$self{filter}"
+        $cmd .= " | $$self{filter}"
     }
     $cmd .= " -Ob -o $outfile.part";
     $self->cmd($cmd);
