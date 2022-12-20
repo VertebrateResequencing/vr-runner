@@ -31,7 +31,7 @@ sub new
     $$self{merge}          = 'bcftools merge';
     $$self{index}          = 'bcftools index';
     $$self{vcfstats}       = 'bcftools stats -c both -s -';
-    $$self{filter}         = 'bcftools filter -m+ -sLowQual -e"%QUAL<=10" -g3 -G10';
+    $$self{filter}         = "bcftools filter -m+ -sLowQual -e 'QUAL<=10' -g3 -G10";
     $$self{concat}         = 'bcftools concat --naive';
     $$self{htsfile}        = 'htsfile';
     $$self{chunk_size}     = 1_000_000;
