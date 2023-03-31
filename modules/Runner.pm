@@ -142,28 +142,33 @@ sub new
     $$self{_status_codes}{ERROR} = 255;
     $$self{_farm} = 'LSF';
     $$self{_farm_options} = {};
+    $$self{_js_options} = {};       # default options for job scheduler
     $$self{_running_jobs} = {};
     $$self{_nretries} = 1;
     $$self{_verbose} = 1;
     $$self{_maxjobs} = 100;
+    $self->_set_defaults("$ENV{HOME}/.runner.conf");
     $$self{usage} =
+        "Runner.pm default settings:\n" .
+        "   \$HOME/.runner.conf\n" .
+        "\n" .
         "Runner.pm arguments:\n" .
         "   +help                   Summary of commands\n" .
-        "   +config <file>          Configuration file\n" .
-        "   +debug <file1> <file2>  Run the freezed object <file1> overriding with keys from <file2>\n" .
-        "   +js <platform>          Job scheduler (lowercase allowed): LSF (bswitch), LSFCR (BLCR), MPM, SLURM [LSF]\n" .
+        "   +config FILE            Configuration file\n" .
+        "   +debug FILE1 FILE2      Run the freezed object FILE1 overriding with keys from FILE2\n" .
+        "   +js PLATFORM            Job scheduler (lowercase allowed): LSF (bswitch), LSFCR (BLCR), MPM, SLURM [$$self{_farm}]\n" .
         "   +kill                   Kill all running jobs\n" .
         "   +local                  Do not submit jobs to LSF, but run serially\n" .
-        "   +lock <file>            Exit if another instance is already running\n" .
-        "   +loop <int>             Run in daemon mode with <int> seconds sleep intervals\n" .
-        "   +mail <address>         Email when the runner finishes\n" .
-        "   +maxjobs <int>          Maximum number of simultaneously running jobs, 0 for unlimited [$$self{_maxjobs}]\n" .
+        "   +lock FILE              Exit if another instance is already running\n" .
+        "   +loop INT               Run in daemon mode with INT seconds sleep intervals\n" .
+        "   +mail ADDRESS           Email when the runner finishes\n" .
+        "   +maxjobs INT            Maximum number of simultaneously running jobs, 0 for unlimited [$$self{_maxjobs}]\n" .
         "   +nocache                When checking for finished files, do not rely on cached database and check again\n" .
-        "   +reset <step>           Reset status of a failed step\n" .
-        "   +retries <int>          Maximum number of retries. When negative, the runner eventually skips the task rather than exiting completely. [$$self{_nretries}]\n" .
-        "   +run <file> <id>        Run the freezed object created by spawn\n" .
+        "   +reset STEP             Reset status of a failed step\n" .
+        "   +retries INT            Maximum number of retries. When negative, the runner eventually skips the task rather than exiting completely. [$$self{_nretries}]\n" .
+        "   +run FILE ID            Run the freezed object created by spawn\n" .
         "   +sampleconf             Print a working configuration example\n" .
-        "   +show <file>            Print the content of the freezed object created by spawn\n" .
+        "   +show FILE              Print the content of the freezed object created by spawn\n" .
         "   +silent                 Decrease verbosity of the Runner module\n" .
         "\n";
     return $self;
@@ -330,6 +335,19 @@ sub run
         $self->debugln($$self{_about}._timestamp(), "sleeping for $$self{_loop} seconds...");
         sleep($$self{_loop});
     }
+}
+
+sub _set_defaults
+{
+    my ($self,$config) = @_;
+    if ( !-e $config ) { return; }
+    open(my $fh,'<',$config) or $self->throw("$config: $!");
+    my @config_lines = <$fh>;
+    close($fh) or $self->throw("close failed: $config");
+    my $config_str = join('',@config_lines);
+    my $x = eval "{ $config_str }";
+    for my $key (keys %$x) { $$self{$key} = $$x{$key}; }
+    if ( scalar keys %{$$self{_js_options}} ) { $self->_init_scheduler; }
 }
 
 sub create_lock
@@ -920,6 +938,10 @@ sub _init_scheduler
             $$self{_js} = $farm->new();
         };
         if ( $@ ) { $self->throw("require $farm\n$@"); }
+        for my $key (keys %{$$self{_js_options}})
+        {
+            $$self{_js}{$key} = $$self{_js_options}{$key};
+        }
         if ( $$self{_maxjobs} ) { $$self{_js}->set_limits(max_jobs=>$$self{_maxjobs}); }
     }
 }
