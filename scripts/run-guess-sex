@@ -28,13 +28,14 @@ sub new
     $$self{sex} = '{Y} < {22}*0.1 ? "F" : "M"';
     $$self{_sampleconf} = '';
 
-    $$self{usage} .= 
+    $$self{usage} .=
         "About: Small pipeline to determine sample sex from bam/cram files\n" .
         "Usage: run-guess-sex\n" .
         "Options:\n" .
-        "   -i, --input-files <list>    List of input files\n" .
-        "   -o, --outdir <dir>          Output directory\n" .
-        "   -s, --sex <expr>            The default is: '{Y} < {22}*0.1 ? \"F\" : \"M\"'\n" .
+        "   -i, --input-files LIST    List of input files\n" .
+        "   -o, --outdir DIR          Output directory\n" .
+        "   -r, --redo                Redo the final steps with different threshold in EXPR\n" .
+        "   -s, --sex EXPR            The default is: '{Y} < {22}*0.1 ? \"F\" : \"M\"'\n" .
         "\n";
 
     return $self;
@@ -47,6 +48,7 @@ sub parse_args
     {
         if ( $arg eq '-i' or $arg eq '--input-files' ) { $$self{input_files}=shift(@ARGV); next; }
         if ( $arg eq '-o' or $arg eq '--outdir' ) { $$self{outdir}=shift(@ARGV); next; }
+        if ( $arg eq '-r' or $arg eq '--redo' ) { $$self{redo}=1; next; }
         if ( $arg eq '-s' or $arg eq '--sex' ) { $$self{sex}=shift(@ARGV); next; }
         $self->throw();
     }
@@ -64,17 +66,40 @@ sub main
     $self->spawn('init_samples',"$$self{outdir}/sample.list",$$self{input_files});
     $self->wait;
 
-    my @files = ();
-    my @samples = $self->parse_samples();
-    for my $sample (@samples)
+    if ( !$self->is_finished("$$self{outdir}.txt") )
     {
-        $self->spawn('bam_stats',"$$self{outdir}/$$sample{id}.txt",$sample);
-        push @files, "$$self{outdir}/$$sample{id}.txt";
+        my @files = ();
+        my @samples = $self->parse_samples();
+        for my $sample (@samples)
+        {
+            $self->spawn('bam_stats',"$$self{outdir}/bchk/$$sample{id}.txt",$sample);
+            push @files, "$$self{outdir}/bchk/$$sample{id}.txt";
+        }
+        $self->wait;
+
+        $self->concat_files("$$self{outdir}.txt", \@files);
     }
+    $self->clean($$self{outdir});
+
+    if ( $$self{redo} ) { $self->redo_expression; }
+
+    $self->spawn('plot_sex_scatter',"$$self{outdir}/plot.scatter.png","$$self{outdir}.txt");
+    $self->spawn('plot_sex_ratio',"$$self{outdir}/plot.ratio.png","$$self{outdir}.txt");
     $self->wait;
-    
-    $self->concat_files("$$self{outdir}.txt", \@files);
+
     $self->all_done;
+}
+
+sub clean
+{
+    my ($self,$outdir) = @_;
+    $self->SUPER::clean($outdir);
+
+    if ( -e "$$self{outdir}/bchk" )
+    {
+        $self->cmd("tar -czf $$self{outdir}/bchk.tgz $$self{outdir}/bchk");
+        $self->cmd("rm -rf $$self{outdir}/bchk");
+    }
 }
 
 sub concat_files
@@ -143,12 +168,12 @@ sub init_samples
             if ( !($aline=~/^\@RG/) ) { next; }
             if ( $aline=~/SM:(\S+)/ && !exists($smpl{$1}) )
             {
-                $smpl{$1} = {fmt=>'aln',file=>$line,sample=>$1,id=>++$id}; 
+                $smpl{$1} = {fmt=>'aln',file=>$line,sample=>$1,id=>++$id};
             }
         }
         close($aln) or $self->throw("$$self{samtools} view -H $line: close failed");
         if ( scalar keys %smpl != 1 ) { $self->throw("Multiple samples in one file, need back `samtools stats` header parsing\n"); }
-        push @out,values %smpl; 
+        push @out,values %smpl;
     }
     close($fh) or $self->throw("$$self{input_files}: close failed");
 
@@ -164,7 +189,7 @@ sub init_samples
 sub bam_stats
 {
     my ($self,$outfile,$file) = @_;
-    
+
     my $chr = $$self{chr_naming} ? 'chr' : '';
     $self->cmd("$$self{samtools} stats $$file{file} $$self{reg1} > $outfile.$$self{reg1}.bchk");
     $self->cmd("$$self{samtools} stats $$file{file} $$self{reg2} > $outfile.$$self{reg2}.bchk");
@@ -175,14 +200,46 @@ sub bam_stats
     my $expr = $$self{sex};
     $expr =~ s/\{$$self{reg1}\}/$num1/;
     $expr =~ s/\{$$self{reg2}\}/$num2/;
-    my $sex = eval $expr;
-    if ( $@ ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
+    $expr = "\$sex = $expr; \$ok = 1";
+    my $ok = 0;
+    my $sex;
+    eval $expr;
+    if ( $@ or !$ok ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
 
     open(my $fh,'>',"$outfile.part") or $self->throw("$outfile.part: $!");
     printf $fh "$$file{sample}\t%s\t%d\t%d\t$$file{file}\n",$sex,$num1,$num2;
     close($fh) or $self->throw("$outfile.part: close failed");
 
     rename("$outfile.part",$outfile);
+}
+
+sub redo_expression
+{
+    my ($self) = @_;
+    my $time = time();
+    $self->cmd("cp $$self{outdir}.txt $$self{outdir}/old.$time.txt");
+    open(my $in,'<',"$$self{outdir}.txt") or $self->throw("$$self{outdir}.txt: $!");
+    open(my $out,'>',"$$self{outdir}.txt.part") or $self->throw("$$self{outdir}.txt.part: $!");
+    while (my $line=<$in>)
+    {
+        if ( $line=~/^#/ ) { print $out; next; }
+        my @col = split(/\t/,$line);
+        my $num1 = $col[2];
+        my $num2 = $col[3];
+        my $expr = $$self{sex};
+        $expr =~ s/\{$$self{reg1}\}/$num1/;
+        $expr =~ s/\{$$self{reg2}\}/$num2/;
+        $expr = "\$sex = $expr; \$ok = 1";
+        my $ok = 0;
+        my $sex;
+        eval $expr;
+        if ( $@ or !$ok ) { $self->throw("Error: \"$$self{sex}\" expanded to \"$expr\" and failed: $@\n"); }
+        $col[1] = $sex;
+        print $out join("\t",@col);
+    }
+    close($in) or $self->throw("close failed: $$self{outdir}.txt");
+    close($out) or $self->throw("close failed: $$self{outdir}.txt.part");
+    rename("$$self{outdir}.txt.part","$$self{outdir}.txt");
 }
 
 sub read_bamstats
@@ -201,6 +258,128 @@ sub read_bamstats
     return $n;
 }
 
+sub plot_sex_scatter
+{
+    my ($self,$img,$infile) = @_;
+    if ( !($img=~/\.png$/) ) { $self->throw("could not parse: $img"); }
+    my $script = "$`.py";
+    open(my $fh,'>',$script) or $self->throw("$script: $!");
+    print $fh qq[#!/usr/bin/env python3
+
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
+
+c_m = '#337ab7'     # blue
+c_f = '#d9534f'     # red
+xdat_m = []
+ydat_m = []
+xdat_f = []
+ydat_f = []
+
+file = open("$infile", 'r')
+for line in file:
+    if line[0] == '#': continue
+    row = line.split("\\t")
+    row[-1] = row[-1].rstrip('\\n')
+    if row[1]=='M':
+        xdat_m.append(float(row[2]))
+        ydat_m.append(float(row[3]))
+    else:
+        xdat_f.append(float(row[2]))
+        ydat_f.append(float(row[3]))
+
+fig = plt.figure(figsize=(5,3.5))
+ax1 = fig.add_subplot(111)
+ax1.scatter(xdat_m,ydat_m,c=c_m,edgecolors='none',zorder=110,alpha=0.7,label='M')
+ax1.scatter(xdat_f,ydat_f,c=c_f,edgecolors='none',zorder=110,alpha=0.7,label='F')
+
+ax1.set_ylabel('Reads mapped to $$self{reg2}')
+ax1.set_xlabel('Reads mapped to $$self{reg1}')
+
+ax1.ticklabel_format(style='sci', scilimits=(-2,2), axis='x')
+ax1.ticklabel_format(style='sci', scilimits=(-2,2), axis='y')
+
+ax1.spines['top'].set_visible(False)
+ax1.spines['right'].set_visible(False)
+ax1.get_xaxis().tick_bottom()
+ax1.get_yaxis().tick_left()
+ax1.spines['bottom'].set_color('grey')
+ax1.spines['left'].set_color('grey')
+mpl.rcParams['text.color'] = '555555'
+ax1.patch.set_visible(False)
+
+plt.legend(loc='best',prop={'size':10},frameon=False)
+plt.subplots_adjust(left=0.15,right=0.95,bottom=0.15,top=0.9)
+plt.savefig('$img',dpi=150)
+
+plt.close()
+];
+    close($fh) or $self->throw("close failed: $script");
+    $self->cmd("python3 $script");
+}
+
+sub plot_sex_ratio
+{
+    my ($self,$img,$infile) = @_;
+    if ( !($img=~/\.png$/) ) { $self->throw("could not parse: $img"); }
+    my $script = "$`.py";
+    open(my $fh,'>',$script) or $self->throw("$script: $!");
+    print $fh qq[#!/usr/bin/env python3
+
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
+
+c_m = '#337ab7'     # blue
+c_f = '#d9534f'     # red
+dat = []
+
+file = open("$infile", 'r')
+for line in file:
+    if line[0] == '#': continue
+    row = line.split("\\t")
+    row[-1] = row[-1].rstrip('\\n')
+    if float(row[3])!=0: ratio = float(row[2])/float(row[3])
+    else: ratio = 0
+    dat.append([ratio,row[1]])
+sdat = sorted(dat, key=lambda x:x[0])
+dat_m = []
+dat_f = []
+for i in range(len(sdat)):
+    sdat[i].append(i)
+    if sdat[i][1]=='M': dat_m.append(sdat[i])
+    else: dat_f.append(sdat[i])
+
+fig = plt.figure(figsize=(5,3.5))
+ax1 = fig.add_subplot(111)
+ax1.scatter([x[2] for x in dat_m],[x[0] for x in dat_m],c=c_m,edgecolors='none',zorder=110,alpha=0.7,label='M')
+ax1.scatter([x[2] for x in dat_f],[x[0] for x in dat_f],c=c_f,edgecolors='none',zorder=110,alpha=0.7,label='F')
+
+ax1.set_ylabel('Read count $$self{reg1} / $$self{reg2}')
+ax1.set_xlabel('Sample')
+
+ax1.ticklabel_format(style='sci', scilimits=(-2,2), axis='x')
+ax1.ticklabel_format(style='sci', scilimits=(-2,2), axis='y')
+
+ax1.spines['top'].set_visible(False)
+ax1.spines['right'].set_visible(False)
+ax1.get_xaxis().tick_bottom()
+ax1.get_yaxis().tick_left()
+ax1.spines['bottom'].set_color('grey')
+ax1.spines['left'].set_color('grey')
+mpl.rcParams['text.color'] = '555555'
+ax1.patch.set_visible(False)
+
+plt.legend(loc='best',prop={'size':10},frameon=False)
+plt.subplots_adjust(left=0.15,right=0.95,bottom=0.15,top=0.9)
+plt.savefig('$img',dpi=150)
+
+plt.close()
+];
+    close($fh) or $self->throw("close failed: $script");
+    $self->cmd("python3 $script");
+}
 
 
 
