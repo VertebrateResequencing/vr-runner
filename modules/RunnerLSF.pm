@@ -18,22 +18,22 @@ sub new
     $$self{Done}    = 16;
     $$self{Waiting} = 32;
 
-    $$self{lsf_status_codes} = 
-    { 
-        DONE  => $$self{Done}, 
-        PEND  => $$self{Running} | $$self{Waiting}, 
-        WAIT  => $$self{Running} | $$self{Waiting}, 
-        EXIT  => $$self{Error}, 
+    $$self{lsf_status_codes} =
+    {
+        DONE  => $$self{Done},
+        PEND  => $$self{Running} | $$self{Waiting},
+        WAIT  => $$self{Running} | $$self{Waiting},
+        EXIT  => $$self{Error},
         ZOMBI => $$self{Zombi},
-        RUN   => $$self{Running}, 
-        UNKWN => $$self{Running}, 
+        RUN   => $$self{Running},
+        UNKWN => $$self{Running},
         SSUSP => $$self{Running},
         USUSP => $$self{Running}
     };
 
     # runtime and queue_limits are in minutes
     $$self{default_limits} = { runtime=>40, memory=>1_000, queue=>'normal' };
-    $$self{queue_limits}   = { basement=>1e9, long=>72*60, normal=>12*60, small=>30 };
+    $$self{queue_limits}   = { basement=>1e9, week=>7*24*60, long=>48*60, normal=>12*60, small=>30 };
 
     # Can be one of: kB,MB,GB or "ask" for `lsadmin showconf lim`
     if ( !exists($$self{lsf_limits_unit}) ) { $$self{lsf_limits_unit} = 'MB'; }
@@ -101,7 +101,7 @@ sub _init_zombies
         for my $item (@items)
         {
             if ( $item=~/^(\d+)$/ ) { $$self{ignore_zombies}{"${id}[$1]"} = 1; next; }
-            my ($from,$to) = split(/-/,$item); 
+            my ($from,$to) = split(/-/,$item);
             for (my $i=$from; $i<=$to; $i++)
             {
                 $$self{ignore_zombies}{"${id}[$i]"} = 1;
@@ -141,7 +141,7 @@ sub init_jobs
     close($fh) or confess("close failed: $jids_file");
 
     # ZOMBI jobs need special care, we cannot be 100% sure that the non-responsive
-    # node stopped writing to network disks. Let the user decide if they can be 
+    # node stopped writing to network disks. Let the user decide if they can be
     # safely ignored.
     my %zombi_warning = ();
 
@@ -155,10 +155,10 @@ sub init_jobs
     # Get info from bjobs -l: iterate over LSF array IDs we remember for this task in the jids_file
     for (my $i=@jids-1; $i>=0; $i--)
     {
-        if ( !exists($$bjobs_info{$jids[$i]}) ) 
-        { 
+        if ( !exists($$bjobs_info{$jids[$i]}) )
+        {
             $no_bjobs_info{$i} = $jids[$i];   # this LSF job is not listed by bjobs
-            next; 
+            next;
         }
         my $info = $$bjobs_info{$jids[$i]};
 
@@ -171,20 +171,20 @@ sub init_jobs
 
         # Update status of input jobs present in the bjobs -l listing. Note that the failed jobs
         # get their status from the output files as otherwise we wouldn't know how many times
-        # they failed already. 
+        # they failed already.
         for (my $j=0; $j<@$ids; $j++)
         {
             my $id = $$ids[$j];
             if ( !exists($$info{$id}) ) { next; }
             if ( $jobs_out[$j]{status} ne $$self{No} ) { next; }   # the job was submitted multiple times and already has a status
 
-            if ( $$info{$id}{status} & $$self{Done} ) 
-            { 
-                $jobs_out[$j]{status} = $$self{Done}; 
+            if ( $$info{$id}{status} & $$self{Done} )
+            {
+                $jobs_out[$j]{status} = $$self{Done};
             }
-            elsif ( $$info{$id}{status} & $$self{Running} ) 
-            { 
-                $jobs_out[$j]{status} = $$self{Running}; 
+            elsif ( $$info{$id}{status} & $$self{Running} )
+            {
+                $jobs_out[$j]{status} = $$self{Running};
                 $jobs_out[$j]{lsf_id} = $$info{$id}{lsf_id};
             }
             elsif ( $$info{$id}{status} & $$self{Zombi} )
@@ -243,7 +243,7 @@ sub init_jobs
     for (my $i=0; $i<@$ids; $i++)
     {
         if ( $jobs_out[$i]{status} & $$self{Running} || $jobs_out[$i]{status} & $$self{Error} ) { $ntodo++; }
-        if ( $$self{limits}{max_jobs} && $ntodo >= $$self{limits}{max_jobs} ) { last; } 
+        if ( $$self{limits}{max_jobs} && $ntodo >= $$self{limits}{max_jobs} ) { last; }
         if ( $jobs_out[$i]{status} ne $$self{No} ) { next; }
         my $info = $self->_parse_output($$ids[$i], $path);
         if ( defined $info )
@@ -318,7 +318,7 @@ sub _parse_bjobs_l
 
             my $job_info = $lines[$i];
             chomp($job_info);
-            $i++; 
+            $i++;
 
             while ( $i<@lines && $lines[$i]=~/^\s{21}(.*)$/ )
             {
@@ -335,7 +335,7 @@ sub _parse_bjobs_l
         }
 
         if ( !defined $job ) { next; }
-        
+
         # Collect also checkpoint data for LSFCR to avoid code duplication: checkpoint directory, memory, status
         # Wed Mar 19 10:14:17: Submitted from host <vr-2-2-02>...
         if ( $lines[$i]=~/^\w+\s+\w+\s+\d+ \d+:\d+:\d+:\s*Submitted from/ )
@@ -350,8 +350,8 @@ sub _parse_bjobs_l
                 chomp($job_info);
             }
             if ( $job_info=~/,\s*Checkpoint directory <([^>]+)>/ ) { $$job{chkpnt_dir} = $1; }
-            if ( $job_info=~/\srusage\[mem=(\d+)/ ) 
-            { 
+            if ( $job_info=~/\srusage\[mem=(\d+)/ )
+            {
                 $$job{mem_usage} = $1 / $$self{lsf_limits_scale};   # convert to MB
             }
         }
@@ -363,7 +363,7 @@ sub _parse_bjobs_l
         # Tue Mar 19 13:00:35: [685] started on <uk10k-4-1-07>...
         # Tue Dec 24 13:12:00: [1] started on 8 Hosts/Processors <8*vr-1-1-05>...
         # Fri Nov 15 00:55:36: Started 1 Task(s) on Host(s) <bc-25-1-08>, Allocated 1 Slo
-        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started on/i ) 
+        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started on/i )
         {
             $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
@@ -371,33 +371,33 @@ sub _parse_bjobs_l
         {
             $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
-        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started \d+ task/i ) 
+        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):.*started \d+ task/i )
         {
             $$job{started} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year);
         }
 
         # Tue Mar 19 13:58:23: Resource usage collected...
-        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ ) 
+        elsif ( $lines[$i]=~/^\w+\s+(\w+)\s+(\d+) (\d+):(\d+):(\d+):\s+Resource usage collected/ )
         {
             if ( !exists($$job{started}) ) { confess("Could not parse the `bjobs -l` output for the job $$job{lsf_id}\nThe current line:\n\t$lines[$i]\nThe complete output:\n", @lines); }
             $$job{wall_time} = date_to_time(month=>$months{$1}, day=>$2, hour=>$3, minute=>$4, year=>$year) - $$job{started};
             if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $$job{wall_time} ) { $$job{cpu_time} = $$job{wall_time}; }
         }
-        if ( $lines[$i]=~/The CPU time used is (\d+) seconds./ ) 
-        { 
+        if ( $lines[$i]=~/The CPU time used is (\d+) seconds./ )
+        {
             if ( !exists($$job{cpu_time}) or $$job{cpu_time} < $1 ) { $$job{cpu_time} = $1; }
         }
-        if ( $lines[$i]=~/started on (\d+) Hosts\/Processors/ ) 
-        { 
+        if ( $lines[$i]=~/started on (\d+) Hosts\/Processors/ )
+        {
             $$job{cpus} = $1;
         }
-        if ( $lines[$i]=~/Exited with exit code (\d+)\./ ) 
-        { 
+        if ( $lines[$i]=~/Exited with exit code (\d+)\./ )
+        {
             $$job{exit_code} = $1;
         }
     }
-    if ( scalar keys %$job) 
-    { 
+    if ( scalar keys %$job)
+    {
         if ( $$job{command}=~/^cr_restart/ && exists($$job{exit_code}) && $$job{exit_code} eq '16' )
         {
             # temporary failure (e.g. pid in use) of cr_restart, ignore this failure
@@ -412,9 +412,9 @@ sub _check_job
 {
     my ($self,$job,$jids_file) = @_;
     my $status = $$self{lsf_status_codes};
-    if ( !exists($$status{$$job{status}}) ) 
-    { 
-        confess("Todo: $$job{status} $$job{lsf_id}\n"); 
+    if ( !exists($$status{$$job{status}}) )
+    {
+        confess("Todo: $$job{status} $$job{lsf_id}\n");
     }
     $$job{status} = $$status{$$job{status}};
     if ( $$job{status}==$$self{Running} )
@@ -462,7 +462,7 @@ sub _parse_output
 
     my $fname = "$output.$jid.o";
     if ( !-e $fname ) { return undef; }
-    
+
     # This original version leads to a problem with stalled jobs that have no record in bjobs
     # and their LSF output file is empty - they would never be rescheduled.
     #
@@ -474,7 +474,7 @@ sub _parse_output
     #   - a job that finished is visible via bjobs until the output is visible on the file system
     #   - this routine is called only when there is no bjobs record
     #
-    # OK, this was not a good idea. Nodes can sometime appear dead (stalled mounts, for example) 
+    # OK, this was not a good idea. Nodes can sometime appear dead (stalled mounts, for example)
     # and later corrupt existing files. Make this configurable for people who want to live
     # dangerously, but return the default to the original cautious behavior.
     #
@@ -507,18 +507,18 @@ sub _parse_output
             if ( !scalar @attempts or exists($attempts[-1]{exit}) ) { warn("Uh, unable to parse $output.$jid.o\n"); next; }
             $attempts[-1]{exit} = $1;
         }
-        # Do not count checkpoint and owner kills as a failure. 
+        # Do not count checkpoint and owner kills as a failure.
         if ( $line =~ /^TERM_CHKPNT/ && $$out{nfailures} ) { $$out{nfailures}--; }
         if ( $line =~ /^TERM_OWNER/ && $$out{nfailures} ) { $$out{nfailures}--; }
         if ( $line =~ /^TERM_MEMLIMIT:/) { $mem_killed = 1; next; }
         if ( $line =~ /^TERM_RUNLIMIT:/) { $cpu_killed = 1; next; }
-        if ( $line =~ /^\s+CPU time\s+:\s+(\S+)\s+(\S+)/) 
+        if ( $line =~ /^\s+CPU time\s+:\s+(\S+)\s+(\S+)/)
         {
             if ( $2 ne 'sec.' ) { confess("Unexpected runtime line: $line"); }
             my $time = $1 / 60;     # minutes
             if ( !exists($$out{runtime}) or $$out{runtime}<$time ) { $$out{runtime} = $time; }
         }
-        if ( $line =~ /^\s+Max Memory\s+:\s+(\S+)\s+(\S+)/) 
+        if ( $line =~ /^\s+Max Memory\s+:\s+(\S+)\s+(\S+)/)
         {
             my $mem = $1;
             if ($2 eq 'KB') { $mem /= 1024; }
@@ -542,7 +542,7 @@ sub _parse_output
 
 sub past_limits
 {
-    my ($self,$task) = @_; 
+    my ($self,$task) = @_;
     my %out = ();
     if ( exists($$task{MEMLIMIT}) )
     {
@@ -589,13 +589,13 @@ sub _set_lsf_limits_unit
         for ($i=2; $i<15; $i++)
         {
             $units = $self->_get_lsf_limits_unit();
-            if ( !defined $units ) 
-            { 
+            if ( !defined $units )
+            {
                 # lasdmin may be temporarily unavailable and return confusing errors:
                 # "Bad host name" or "ls_gethostinfo(): A socket operation has failed: Address already in use"
                 print STDERR "lsadmin failed, trying again in $i sec...\n";
-                sleep $i; 
-                next; 
+                sleep $i;
+                next;
             }
             last;
         }
@@ -631,10 +631,10 @@ sub _create_bsub_opts_string
     my $queue   = $self->_get_queue($runtime);
     if ( !defined $queue ) { $queue = $$self{default_limits}{queue}; }
 
-    $bsub_opts  = sprintf " -M%d -R 'select[type==X86_64 && mem>%d] rusage[mem=%d]'", $lmem,$mem,$mem; 
+    $bsub_opts  = sprintf " -M%d -R 'select[type==X86_64 && mem>%d] rusage[mem=%d]'", $lmem,$mem,$mem;
     $bsub_opts .= " -q $queue";
     $bsub_opts .=  exists($$self{limits}{custom}) ? ' '.$$self{limits}{custom} : '';    # custom options, such as -R avx
-    if ( defined($$self{limits}{cpus}) ) 
+    if ( defined($$self{limits}{cpus}) )
     {
         $bsub_opts .= " -n $$self{limits}{cpus} -R 'span[hosts=1]'";
     }
@@ -666,7 +666,7 @@ sub _create_bsub_ids_string
     else { push @bsub_ids, $from; }
     my $bsub_ids  = join(',', @bsub_ids);
     my @skipped_bsub_ids;
-    while ( length($job_name) + length($bsub_ids) > 250 && scalar @bsub_ids ) 
+    while ( length($job_name) + length($bsub_ids) > 250 && scalar @bsub_ids )
     {
         push @skipped_bsub_ids, pop(@bsub_ids);
         $bsub_ids = join(',', @bsub_ids);
@@ -714,7 +714,7 @@ sub run_jobs
     {
         my $bsub_ids = $self->_create_bsub_ids_string($job_name,\@ids);
 
-        # Do not allow the system to requeue jobs automatically, we would loose track of the job ID: -rn 
+        # Do not allow the system to requeue jobs automatically, we would loose track of the job ID: -rn
         my $bsub_cmd  = qq[bsub -rn -J '${job_name}[$bsub_ids]' -e $job_name.\%I.e -o $job_name.\%I.o $bsub_opts '$cmd'];
 
         # Submit to LSF
