@@ -113,6 +113,18 @@ pending tasks; therefore it is better to set the number to a realistic value.
 <dt>Kill all running jobs</dt>
 <dd>When something goes wrong and all running jobs must be killed, use the <b>+kill</b> option.
 </dd>
+
+<dt>Default LSF queue limits</dt>
+<dd>LSF queue limits are defined in the <tt>modules/RunnerLSF.pm</tt> module. Rather than modifying the source code directly, place custom settings in the config file <tt>~/.runner.conf</tt>. For example:
+
+    $ cat ~/.runner.conf
+    _js_options =>
+    {
+        default_limits => { runtime=>40, memory=>1_000, queue=>'normal' },
+        queue_limits   => { basement=>1e9, week=>7*24*60, long=>48*60, normal=>12*60, small=>30 },
+    },
+
+</dd>
 </dl>
 
 
