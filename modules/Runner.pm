@@ -519,6 +519,25 @@ sub set_limits
     if ( exists($args{nocache}) ) { $$self{_nocache} = $args{nocache}; }
 }
 
+=head2 reset_limits
+
+    About : Clear limits to its initial state and then call set_limits
+    Usage : $self->reset_limits(memory=>1_000, runtime=>24*60);
+    Args  : Same as set_limits
+
+=cut
+
+sub reset_limits
+{
+    my ($self,%args) = @_;
+    # clear limits
+    for my $key (keys %{$$self{_farm_options}})
+    {
+        delete($$self{_farm_options}{$key});
+    }
+    $self->set_limits(%args);
+}
+
 # Prepend explicit local directory prefix to prevent "do" statements searching @INC and leading
 # to warnings such as:
 #   do "out/.jobs/job.w.r.1.limits" failed, '.' is no longer in @INC; did you mean do "./out/.jobs/job.w.r.1.limits"
@@ -686,6 +705,8 @@ sub spawn
 {
     my ($self,$call,@args) = @_;
 
+    if ( !defined($call) ) { $self->throw("Undefined function name passed to spawn\n"); }
+    if ( !exists($args[0]) or !defined($args[0]) ) { $self->throw("Undefined output file name passed to spawn\n"); }
     if ( !$self->can($call) ) { $self->throw("No such method: [$call]\n"); }
     if ( exists($$self{_spawned}{$args[0]}) ) { $self->throw("The checkpoint file is not unique in $call: $args[0]\n"); }
     $$self{_spawned}{$args[0]} = 1;
@@ -1328,15 +1349,23 @@ sub clean
 
     if ( !@dirs ) { return; }
 
-    # Create the tarball, existing file will not be overwritten
-    my $tarball = $dirs[0] . '/cleaned-job-outputs.tgz';
-    if ( !-e $tarball )
+    # Create the tarball, with a timestap, to prevent loosing outputs on reruns when things go wrong
+    my $tarball = $dirs[0] . '/cleaned-job-outputs.' . time() . '.tgz';
+
+    my $dirs = join(' ',@dirs);
+    my $cmd = "find $dirs -name .jobs | tar -T - -czf $tarball";
+    $self->debugln($cmd);
+    system($cmd);
+
+    # Remove the tarball if it's empty
+    my $is_empty = (!scalar `tar -tzf $tarball | head -1`) ? 1 : 0;
+    if ( $is_empty )
     {
-        my $dirs = join(' ',@dirs);
-        my $cmd = "find $dirs -name .jobs | tar -T - -czf $tarball";
-        $self->debugln($cmd);
-        system($cmd);
+        $self->debugln("No outputs, cleaning: $tarball");
+        unlink($tarball);
+        return;
     }
+
     for my $dir (@dirs)
     {
         my $cmd = "find $dir -name .jobs | xargs rm -rf";
