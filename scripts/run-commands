@@ -30,7 +30,7 @@ sub new
             # the version key in your config file to get rid of the warnings.
             version  => '] .$$self{config_version}. q[',
 
-            # Select files in the input directory on which the commands below 
+            # Select files in the input directory on which the commands below
             # will be executed. The files will be processed in parallel.
             glob => [qw(*.vcf.gz *.bcf)],
 
@@ -46,7 +46,7 @@ sub new
             #               and deleted when finished.
 
             # Commands to be executed for each input file. For example:
-            # cmds => 
+            # cmds =>
             # [
             #     '{bcftools} annotate ... {in} -Ob -o {tmpdir}/1.bcf',
             #     '{bcftools} index {tmpdir}/1.bcf',
@@ -60,12 +60,22 @@ sub new
             #     "{outdir}/mapping.txt" => "{in}\t{out}",
             # },
 
+            # Commands to merge/finalize all the outputs
+            # merge =>
+            # [
+            #   q[
+            #       cat {outdir}/mapping.txt | cut -f2 | while read x; do
+            #           zcat $x | ...
+            #       done | gzip -c > {outdir}/merged.txt.gz
+            #   ],
+            # ],
+
             # Optional required resources, minutes and MB
             # limits   => { runtime=>60, memory=>5000 },
 
     ]."\n";
 
-    $$self{usage} .= 
+    $$self{usage} .=
         "About: Small pipeline to parallelize series of commands\n" .
         "Usage: run-commands\n" .
         "Options:\n" .
@@ -90,6 +100,7 @@ sub parse_args
     if ( !exists($$self{outdir}) ) { $self->throw("Expected the -o option."); }
     if ( !defined($$self{indir}) && !defined($$self{inlist}) ) { $self->throw("Expected the -i or -l option."); }
     if ( !defined($$self{cmds}) ) { $self->throw("Expected the 'cmds' config key."); }
+    if ( !defined($$self{merge}) ) { $$self{merge} = []; }
 }
 
 sub main
@@ -119,6 +130,14 @@ sub main
     for my $file (@files) { $self->cmd("rm -rf $$file{tmpdir}"); }
 
     $self->create_io_map(\@files);
+
+    for (my $i=0; $i<@{$$self{merge}}; $i++)
+    {
+        my $cmd  = $$self{merge}[$i];
+        my $task = $self->expand_vars($cmd);
+        $self->spawn('run_command',"$$self{outdir}/done/merge.$i.done",$task);
+        $self->wait;
+    }
 
     $self->all_done;
 }
